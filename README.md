@@ -21,11 +21,32 @@ uv sync
 
 ## Utilisation
 
-Ouvrir `indusense.ipynb` dans VS Code, choisir le noyau de l'environnement `indusense`, puis tout exécuter.
-
 Les cartes sont écrites dans `artifacts/ingestion/identities/<AAAAMMJJ>/<fichier>_<HHMMSS>.md`
-(dossier ignoré par git). Le notebook est versionné avec ses sorties : les cartes sont visibles sur GitHub
-sans l'exécuter.
+(dossier ignoré par git), relatif au dossier courant.
+
+### Ligne de commande
+
+Depuis la racine du projet, pour un ou plusieurs fichiers CSV (`.csv`, `.tsv`) ou scripts SQL (`.sql`, `.sql.txt`) :
+
+```shell
+uv run indusense datas/telemetry.csv
+uv run indusense datas/releves_incidents.csv datas/machine.sql.txt
+```
+
+La commande affiche le chemin de chaque carte écrite. Les erreurs (fichier introuvable, format non pris en
+charge...) sont affichées sur la sortie d'erreur sans bloquer les autres fichiers ; le code de sortie vaut alors 1.
+
+### Notebook
+
+Ouvrir `indusense.ipynb` dans VS Code, choisir le noyau de l'environnement `indusense`, puis tout exécuter :
+il explique la démarche et génère les cartes des trois fichiers de `datas/`. Il est versionné avec ses sorties :
+les cartes sont visibles sur GitHub sans l'exécuter.
+
+### Skill Claude Code
+
+Le skill `carte-identite` (`.claude/skills/carte-identite/`) appelle la ligne de commande puis résume la carte.
+Dans Claude Code, lancé à la racine du projet : `/carte-identite datas/telemetry.csv`, ou simplement
+« fais la carte d'identité de datas/telemetry.csv ».
 
 ## Structure
 
@@ -35,7 +56,16 @@ datas/
   releves_incidents.csv    relevés d'incidents opérateurs
   machine.sql.txt          référentiel machines et maintenance (script PostgreSQL)
   TODO-SPRINT1_1.md        consignes du sprint
-indusense.ipynb            génération des cartes d'identité
+src/indusense/
+  __init__.py              describer : choix du traitement selon le format du fichier
+  reading.py               taille, charset et séparateur
+  inference.py             inférence du type des colonnes
+  stats.py                 statistiques des colonnes numériques et dates
+  card.py                  construction de la carte, lecture des CSV
+  sql.py                   carte d'un script SQL
+  cli.py                   ligne de commande indusense
+indusense.ipynb            explications et génération des cartes
+.claude/skills/            skill Claude Code carte-identite
 artifacts/                 cartes générées (non versionnées)
 ```
 

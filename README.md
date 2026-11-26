@@ -72,8 +72,13 @@ par la couche silver (`src/indusense/silver/casting.py`).
 Seule exception : les données personnelles marquées `pseudonymize` dans le contrat (`operator_name`,
 `operator_badge`) ne sont jamais écrites en clair. Le bronze reçoit `HMAC-SHA256(ANONYMISATION_SALT, valeur)` :
 un même opérateur garde le même pseudonyme, sans que son nom soit stocké. Le sel (`ANONYMISATION_SALT` dans
-`.env`) est un secret : sans lui le chargement échoue, et le changer change tous les pseudonymes. Rejouer le notebook ne crée aucun doublon : la clé
-primaire est `(_source_hash, _row_number)`. Chaque lot est consigné dans `bronze._ingestion_batch`.
+`.env`) est un secret : sans lui le chargement échoue, et le changer change tous les pseudonymes.
+
+Chaque exécution d'ingestion a un `batch_id` (UUID) et une heure (`_ingested_at`), communs aux quatre tables. Elle
+insère toutes les lignes de ses fichiers (historique en ajout seul, clé primaire `_id` auto-générée) :
+`WHERE _batch_id = ...` retrouve ses lignes dans chaque table, et le registre `bronze._ingestion_batch` dit quels
+fichiers elle a utilisés (chemin et SHA-256). Une exécution est atomique : au moindre échec, aucune table ne
+garde son batch.
 
 Si un contrat change le DDL, la cellule de migration échoue sur `command.check` : générer la migration
 (`uv run alembic revision --autogenerate -m "..."`), la relire, la committer, puis relancer.

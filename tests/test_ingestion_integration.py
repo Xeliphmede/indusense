@@ -6,6 +6,7 @@ Ignorés si PostgreSQL n'est pas joignable (docker compose up -d db).
 import copy
 import csv
 import json
+from datetime import UTC, datetime
 import uuid
 import re
 from contextlib import contextmanager
@@ -15,7 +16,7 @@ from alembic import command
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
-from indusense.bronze.contract import load_contracts, source_path
+from indusense.bronze.contract import load_contracts, project_path, source_path
 from indusense.bronze.fingerprint import row_fingerprint
 from indusense.bronze.loader import ValidationFailed, bronze_record, file_sha256, load_contracts_into
 from indusense.bronze.readers import iter_rows
@@ -54,6 +55,13 @@ def first_load(engine):
     return {r.target_table.split(".")[1]: r for r in load_contracts_into(load_contracts(), engine)}
 
 
+@pytest.fixture(scope="module")
+def batch(first_load):
+    """batch_id de la première exécution, commun aux quatre tables."""
+    [batch_id] = {r.batch_id for r in first_load.values()}
+    return batch_id
+
+
 def scalar(engine, sql: str, **params):
     with engine.connect() as conn:
         return conn.execute(text(sql), params).scalar_one()
@@ -83,17 +91,19 @@ def test_every_column_is_text(engine, first_load):
 
 @pytest.mark.parametrize(("contract", "column"), [("telemetry.json", "temperature_c"), ("telemetry.json", "timestamp"),
                                                   ("releves_incidents.json", "comment")])
-def test_column_is_identical_to_the_source(engine, first_load, contract, column):
+def test_column_is_identical_to_the_source(engine, batch, contract, column):
     table = load_contracts()[contract]["target"]["table"]
     with engine.connect() as conn:
-        stored = conn.execute(text(f'SELECT "{column}" FROM bronze.{table} ORDER BY _row_number')).scalars().all()
+        stored = conn.execute(text(f'SELECT "{column}" FROM bronze.{table} WHERE _batch_id = :b ORDER BY _row_number'),
+                              {"b": batch}).scalars().all()
     assert stored == read_source_column(contract, column)
 
 
-def test_blank_values_are_kept_as_empty_text(engine, first_load):
+def test_blank_values_are_kept_as_empty_text(engine, batch):
     blanks = read_source_column("telemetry.json", "temperature_c").count("")
     assert blanks > 0
-    assert scalar(engine, "SELECT count(*) FROM bronze.telemetry WHERE temperature_c = ''") == blanks
+    assert scalar(engine, "SELECT count(*) FROM bronze.telemetry WHERE temperature_c = '' AND _batch_id = :b",
+                  b=batch) == blanks
     assert scalar(engine, "SELECT count(*) FROM bronze.telemetry WHERE temperature_c IS NULL") == 0
 
 
@@ -153,18 +163,71 @@ def test_sql_null_stays_null(engine, first_load):
     assert scalar(engine, "SELECT duration_hours FROM bronze.maintenance WHERE maintenance_id = '1'") == "2.24"
 
 
-def test_replaying_duplicates_nothing(engine, first_load):
-    replay = load_contracts_into(load_contracts(), engine)
-    assert all(r.status == "SUCCESS" and r.rows_inserted == 0 for r in replay)
-    assert {r.target_table.split(".")[1]: r.rows_skipped for r in replay} == EXPECTED_ROWS
+def test_one_batch_id_per_run_shared_by_every_table(engine, first_load, batch):
+    assert isinstance(batch, uuid.UUID)
+    times = set()
     for table, expected in EXPECTED_ROWS.items():
-        assert scalar(engine, f"SELECT count(*) FROM bronze.{table}") == expected
+        assert scalar(engine, f"SELECT count(*) FROM bronze.{table} WHERE _batch_id = :b", b=batch) == expected
+        times |= {scalar(engine, f"SELECT DISTINCT _ingested_at FROM bronze.{table} WHERE _batch_id = :b", b=batch)}
+    assert len(times) == 1  # une exécution, une heure d'ingestion, dans toutes les tables
 
 
-def test_registry_records_every_batch(engine, first_load):
-    assert scalar(engine, "SELECT count(*) FROM bronze._ingestion_batch WHERE status = 'RUNNING'") == 0
-    assert scalar(engine, "SELECT count(DISTINCT contract) FROM bronze._ingestion_batch WHERE status = 'SUCCESS' "
-                          "AND contract = ANY(:names)", names=list(load_contracts())) == 4
+def test_registry_tells_which_files_each_batch_used(engine, first_load, batch):
+    with engine.connect() as conn:
+        files = conn.execute(text("SELECT contract, source_file, source_hash, status FROM bronze._ingestion_batch "
+                                  "WHERE batch_id = :b ORDER BY contract"), {"b": batch}).all()
+    contracts = load_contracts()
+    assert [f.contract for f in files] == sorted(contracts)
+    for f in files:
+        path = source_path(contracts[f.contract])
+        assert (f.source_file, f.source_hash, f.status) == (project_path(path), file_sha256(path), "SUCCESS")
+        table = contracts[f.contract]["target"]["table"]
+        assert scalar(engine, f"SELECT count(*) FROM bronze.{table} WHERE _batch_id = :b AND _source_hash <> :h",
+                      b=batch, h=f.source_hash) == 0
+
+
+def primary_key(engine, table: str) -> list[str]:
+    with engine.connect() as conn:
+        return conn.execute(text(
+            "SELECT k.column_name FROM information_schema.table_constraints c JOIN information_schema.key_column_usage k "
+            "USING (constraint_schema, constraint_name) WHERE c.table_schema = 'bronze' AND c.table_name = :t "
+            "AND c.constraint_type = 'PRIMARY KEY' ORDER BY k.ordinal_position"), {"t": table}).scalars().all()
+
+
+def test_primary_key_is_an_auto_generated_id(engine, first_load):
+    for table in EXPECTED_ROWS:
+        assert primary_key(engine, table) == ["_id"], table
+        assert scalar(engine, f"SELECT count(DISTINCT _id) FROM bronze.{table}") == scalar(
+            engine, f"SELECT count(*) FROM bronze.{table}")
+
+
+def test_each_run_appends_a_new_batch(engine, first_load, batch):
+    rerun = load_contracts_into(load_contracts(), engine)
+    [second] = {r.batch_id for r in rerun}
+    assert second != batch
+    assert all(r.status == "SUCCESS" for r in rerun)
+    assert {r.target_table.split(".")[1]: r.rows_inserted for r in rerun} == EXPECTED_ROWS
+    for table, expected in EXPECTED_ROWS.items():
+        assert scalar(engine, f"SELECT count(*) FROM bronze.{table} WHERE _batch_id = :b", b=second) == expected
+    changed = scalar(engine, "SELECT count(*) FROM (SELECT _row_number, hash FROM bronze.telemetry WHERE _batch_id = :a "
+                             "EXCEPT SELECT _row_number, hash FROM bronze.telemetry WHERE _batch_id = :b) AS d",
+                     a=batch, b=second)
+    assert changed == 0  # mêmes fichiers : mêmes lignes, mêmes empreintes
+
+
+def test_a_failure_rolls_back_the_whole_run(engine, first_load, tmp_path):
+    source = tmp_path / "telemetry_bad.csv"
+    source.write_text("machine_id,timestamp,temperature_c,pressure_bar,voltage_mean_v,rotation_mean_rpm,pieces_produced\n"
+                      "MACH-97,2030-01-01 00:00:00,40,1,1,1\n")
+    contracts = load_contracts()
+    contracts["telemetry.json"]["source"]["path"] = str(source)
+    results = {r.contract: r for r in load_contracts_into(contracts, engine)}
+    assert results["telemetry.json"].status == "FAILED"
+    assert {r.status for name, r in results.items() if name != "telemetry.json"} == {"ROLLED_BACK"}
+    [failed_batch] = {r.batch_id for r in results.values()}
+    for table in EXPECTED_ROWS:
+        assert scalar(engine, f"SELECT count(*) FROM bronze.{table} WHERE _batch_id = :b", b=failed_batch) == 0
+    assert scalar(engine, "SELECT count(*) FROM bronze._ingestion_batch WHERE batch_id = :b", b=failed_batch) == 4
 
 
 def test_malformed_row_rolls_back_the_whole_file(engine, first_load, tmp_path):
@@ -286,21 +349,21 @@ def test_migration_0002_keeps_loaded_data():
         assert (row.temperature_c_raw, row.temperature_c, row.pieces_produced) == ("", None, 4)
 
 
-def insert_as_before(engine, contract: dict, salt: str | None = None) -> None:
+def insert_as_before(engine, contract: dict, salt: str | None = None, ingested_at=None, batch_id=None) -> None:
     """Insère les lignes du fichier comme le faisait le chargement avant 0004 : colonnes du fichier (pseudonymisées
     si salt est donné) et colonnes techniques, sans <col>_type ni hash."""
     path = source_path(contract)
     table = contract["target"]["table"]
     names = [entry["target_name"] for entry in contract["columns"]]
-    rows = []
+    rows, batch_id = [], batch_id or uuid.uuid4()  # avant 0005 : un batch_id par chargement de fichier
     for number, values in iter_rows(contract, path):
         row = {}
         for entry in contract["columns"]:
             value = values[entry["source_name"]]
             row[entry["target_name"]] = pseudonymize(value, salt) if salt and entry.get("pseudonymize") else value
-        rows.append(row | {"_batch_id": uuid.uuid4(), "_source_file": "datas/x", "_source_hash": file_sha256(path),
-                           "_row_number": number})
-    columns = names + ["_batch_id", "_source_file", "_source_hash", "_row_number"]
+        rows.append(row | {"_batch_id": batch_id, "_source_file": "datas/x", "_source_hash": file_sha256(path),
+                           "_row_number": number, "_ingested_at": ingested_at or datetime.now(UTC)})
+    columns = names + ["_batch_id", "_source_file", "_source_hash", "_row_number", "_ingested_at"]
     with engine.begin() as conn:
         conn.execute(text(f"INSERT INTO bronze.{table} ({', '.join(f'\"{c}\"' for c in columns)}) "
                           f"VALUES ({', '.join(f':{c}' for c in columns)})"), rows)
@@ -322,8 +385,8 @@ def test_migration_0003_pseudonymizes_loaded_operators():
         assert scalar(engine, "SELECT count(*) FROM bronze.releves_incidents "
                               "WHERE operator_name !~ '^[0-9a-f]{64}$' OR operator_badge !~ '^[0-9a-f]{64}$'") == 0
 
-        [replay] = load_contracts_into({"releves_incidents.json": contract}, engine)
-        assert (replay.rows_inserted, replay.rows_skipped) == (0, 1245)
+        [rerun] = load_contracts_into({"releves_incidents.json": contract}, engine)
+        assert rerun.rows_inserted == 1245  # nouveau batch : mêmes pseudonymes que les lignes migrées
         assert scalar(engine, "SELECT count(DISTINCT operator_name) FROM bronze.releves_incidents") == len(
             {name.strip().casefold() for name in read_source_column("releves_incidents.json", "operator_name")})
 
@@ -335,8 +398,7 @@ def test_migration_0004_adds_types_and_the_same_hash_as_the_loader():
         contract = load_contracts()["maintenance.json"]
         insert_as_before(engine, contract)
 
-        command.upgrade(config, "head")
-        command.check(config)
+        command.upgrade(config, "0004")
         expected = {number: bronze_record(contract, values)
                     for number, values in iter_rows(contract, source_path(contract))}
         with engine.connect() as conn:
@@ -351,3 +413,32 @@ def test_migration_0004_adds_types_and_the_same_hash_as_the_loader():
                                         "'bronze' AND table_name = 'maintenance' ORDER BY ordinal_position")).scalars().all()
         assert columns == [e["target_name"] for e in contract["columns"]] + [
             "_batch_id", "_source_file", "_source_hash", "_row_number", "_ingested_at"]
+
+
+def test_migration_0005_keeps_loaded_rows_and_adds_an_id():
+    """Les lignes chargées avant 0005 gardent leur batch_id et leur heure d'ingestion, cohérents avec le registre,
+    et reçoivent un _id auto-généré ; une nouvelle exécution ajoute ses lignes sous un nouveau batch_id."""
+    with scratch_database("indusense_test_batch_id") as (config, engine):
+        command.upgrade(config, "0003")
+        contract = load_contracts()["machine.json"]
+        old_batch = uuid.uuid4()
+        loaded_at = datetime(2026, 11, 20, 16, 21, 40, 123456, tzinfo=UTC)
+        insert_as_before(engine, contract, ingested_at=loaded_at, batch_id=old_batch)
+        command.upgrade(config, "0004")
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO bronze._ingestion_batch (batch_id, contract, target_table, source_file, "
+                              "source_hash, status, rows_read, rows_inserted, rows_skipped, started_at, completed_at) "
+                              "VALUES (:b, 'machine.json', 'bronze.machine', 'datas/machine.sql.txt', 'h', 'SUCCESS', "
+                              "15, 15, 0, :t, :t)"), {"b": old_batch, "t": loaded_at})
+
+        command.upgrade(config, "head")
+        command.check(config)
+        assert scalar(engine, "SELECT count(*) FROM bronze.machine WHERE _batch_id = :b AND _ingested_at = :t",
+                      b=old_batch, t=loaded_at) == 15
+        assert scalar(engine, "SELECT batch_id FROM bronze._ingestion_batch") == old_batch
+        assert primary_key(engine, "machine") == ["_id"]
+        assert scalar(engine, "SELECT count(DISTINCT _id) FROM bronze.machine") == 15
+
+        [rerun] = load_contracts_into({"machine.json": contract}, engine)
+        assert rerun.status == "SUCCESS" and rerun.batch_id != old_batch
+        assert scalar(engine, "SELECT count(DISTINCT _batch_id) FROM bronze.machine") == 2

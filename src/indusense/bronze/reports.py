@@ -8,14 +8,12 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import Engine, func, select, text
-from sqlalchemy.dialects import postgresql
+from sqlalchemy import Engine, func, select
 
 from indusense.bronze.loader import LoadResult
-from indusense.bronze.schema import BRONZE_TYPES, TECHNICAL_COLUMNS, build_metadata, raw_name
+from indusense.bronze.schema import TECHNICAL_COLUMNS, build_metadata
 
 REPORTS_DIR = Path("artifacts/ingestion/bronze")
-TEXT_TYPES = {"IDENTIFIER", "CATEGORY", "TEXT"}
 
 
 class InvalidReport(Exception):
@@ -23,23 +21,22 @@ class InvalidReport(Exception):
 
 
 def transformations(contract: dict) -> list[dict]:
-    """Ce que le bronze a fait à chaque colonne, puis les opérations déclarées pour silver (non exécutées)."""
-    steps = []
-    for entry in contract["columns"]:
-        name, col_type = entry["target_name"], entry["type"]
-        if col_type in TEXT_TYPES:
-            detail = "copie à l'identique de la valeur brute (vide -> NULL)"
-        else:
-            sql_type = BRONZE_TYPES[col_type]().compile(dialect=postgresql.dialect())
-            detail = f"conversion au mieux en {sql_type} ; échec -> NULL et motif dans _cast_errors"
-        steps.append({"code": "CAST", "target": name, "source": [raw_name(name)], "detail": detail, "layer": "bronze"})
-        if col_type == "TIMESTAMPTZ":
-            steps.append({"code": "TZ_LABEL", "target": name, "source": [raw_name(name)], "layer": "bronze",
-                          "detail": f"horloge {contract['timezone']} déclarée : valeur sans fuseau étiquetée "
-                                    f"{contract['timezone']}, aucune conversion appliquée"})
+    """Ce que le bronze a fait à la donnée (copie en texte, traçabilité), puis ce que silver devra faire
+    (typage vers silver_type, opérations dérivées), marqué non exécuté."""
+    steps = [
+        {"code": "COPY", "target": entry["target_name"], "source": [entry["source_name"]], "layer": "bronze",
+         "detail": "valeur d'origine copiée telle quelle en TEXT, aucune conversion"}
+        for entry in contract["columns"]
+    ]
     steps.append({"code": "TRACE", "target": TECHNICAL_COLUMNS, "source": [contract["source"]["path"]],
-                  "layer": "bronze", "detail": "ajout des colonnes de traçabilité (lot, fichier, SHA-256, numéro de "
-                                               "ligne, horodatage, erreurs de cast)"})
+                  "layer": "bronze", "detail": "ajout des colonnes de traçabilité (lot, fichier, SHA-256, numéro "
+                                               "d'enregistrement, horodatage d'ingestion)"})
+    for entry in contract["columns"]:
+        detail = f"conversion en {entry['silver_type']} (type {entry['type']})"
+        if entry["type"] == "TIMESTAMPTZ":
+            detail += f", horloge {contract['timezone']} déclarée : valeur sans fuseau étiquetée, jamais convertie"
+        steps.append({"code": "CAST", "target": entry["target_name"], "source": [entry["target_name"]],
+                      "layer": "silver", "executed": False, "detail": detail})
     for entry in contract.get("derived_columns", []):
         steps.append({"code": entry["operation"], "target": entry["target_name"], "source": entry["operate_on_columns"],
                       "layer": "silver", "executed": False, "detail": entry.get("description", "")})
@@ -47,32 +44,31 @@ def transformations(contract: dict) -> list[dict]:
 
 
 def column_statistics(contract: dict, result: LoadResult, engine: Engine) -> dict[str, dict]:
-    """Par colonne, sur les lignes du fichier chargé (_source_hash) : échecs de cast, taux de NULL, min, max."""
+    """Par colonne, sur les lignes du fichier chargé (_source_hash) : part de valeurs vides (NULL ou blanc),
+    nombre de valeurs distinctes, longueur maximale."""
     table = build_metadata([contract]).tables[f"bronze.{contract['target']['table']}"]
     stats = {}
     with engine.connect() as conn:
         for entry in contract["columns"]:
             col = table.c[entry["target_name"]]
-            ordered = entry["type"] not in TEXT_TYPES | {"BINARY"}
+            blank = func.coalesce(func.btrim(col), "") == ""
             query = select(
                 func.count(),
-                func.count().filter(table.c._cast_errors.has_key(entry["target_name"])),
-                func.count().filter(col.is_(None)),
-                func.min(col) if ordered else text("NULL"),
-                func.max(col) if ordered else text("NULL"),
+                func.count().filter(blank),
+                func.count(func.distinct(col)).filter(~blank),
+                func.max(func.length(col)),
             ).where(table.c._source_hash == result.source_hash)
-            total, failures, nulls, low, high = conn.execute(query).one()
+            total, empty, distinct, max_length = conn.execute(query).one()
             stats[entry["target_name"]] = {
-                "cast_failures": failures,
-                "null_rate": nulls / total if total else None,
-                "min": low,
-                "max": high,
+                "empty_rate": empty / total if total else None,
+                "distinct_values": distinct,
+                "max_length": max_length,
             }
     return stats
 
 
 def build_report(contract: dict, result: LoadResult) -> dict:
-    """Rapport d'ingestion : volumes, erreurs de cast, statut du lot."""
+    """Rapport d'ingestion : volumes, statut du lot, transformations."""
     return {"kind": "BRONZE_INGESTION_REPORT", **result.as_dict(),
             "source_path": contract["source"]["path"], "transformations": transformations(contract)}
 
@@ -82,7 +78,7 @@ def build_data_dictionary(contract: dict, result: LoadResult, engine: Engine) ->
     stats = column_statistics(contract, result, engine) if result.status == "SUCCESS" else {}
     columns = [
         {"source_name": entry["source_name"], "target_name": entry["target_name"],
-         "raw_column": raw_name(entry["target_name"]), "type": entry["type"], "unit": entry.get("unit"),
+         "bronze_type": "TEXT", "type": entry["type"], "unit": entry.get("unit"),
          "silver_type": entry["silver_type"], "personal_data": entry.get("personal_data", False),
          "description": entry.get("description"), **stats.get(entry["target_name"], {})}
         for entry in contract["columns"]

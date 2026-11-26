@@ -1,52 +1,33 @@
 """Schéma bronze construit à partir des contrats : métadonnée SQLAlchemy, comparée à la base par Alembic.
 
-Pour chaque colonne du contrat, deux colonnes physiques (ADR-002) :
-- `<col>_raw` TEXT : la valeur d'origine, intacte,
-- `<col>` typée : la valeur convertie au mieux, NULL si la conversion échoue (motif dans `_cast_errors`).
+Chaque colonne du contrat devient une colonne TEXT qui reçoit la valeur d'origine, intacte : le bronze ne
+convertit rien. Le type visé (`type`, `silver_type`) est un contrat pour la couche silver, qui fera le typage.
 """
 
 from pathlib import Path
 
 from alembic.config import Config
-from sqlalchemy import (BigInteger, Boolean, Column, Date, DateTime, Double, MetaData, PrimaryKeyConstraint,
-                        Table, Text, Time, Uuid, text)
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import BigInteger, Column, DateTime, MetaData, PrimaryKeyConstraint, Table, Text, Uuid, text
 from sqlalchemy.engine import URL
 
 from indusense.settings import PROJECT_ROOT, get_settings
 
 SCHEMA = "bronze"
 REGISTRY_TABLE = "_ingestion_batch"
-TECHNICAL_COLUMNS = ["_batch_id", "_source_file", "_source_hash", "_row_number", "_ingested_at", "_cast_errors"]
-
-# type du contrat -> type de la colonne typée en bronze
-BRONZE_TYPES = {
-    "IDENTIFIER": Text,
-    "CATEGORY": Text,
-    "TEXT": Text,
-    "NUMBER": Double,
-    "INTEGER": BigInteger,
-    "BINARY": Boolean,
-    "DATE": Date,
-    "TIME": Time,
-    "TIMESTAMPTZ": lambda: DateTime(timezone=True),
-}
+TECHNICAL_COLUMNS = ["_batch_id", "_source_file", "_source_hash", "_row_number", "_ingested_at"]
 
 NAMING_CONVENTION = {"pk": "pk_%(table_name)s"}
 
 
-def raw_name(target_name: str) -> str:
-    return f"{target_name}_raw"
+def column_comment(entry: dict) -> str:
+    """Commentaire PostgreSQL d'une colonne bronze : sa colonne source, puis sa description éventuelle."""
+    comment = f"Valeur d'origine de '{entry['source_name']}'"
+    return f"{comment} : {entry['description']}" if entry.get("description") else comment
 
 
 def contract_table(contract: dict, metadata: MetaData) -> Table:
-    """Table bronze d'un contrat : paires <col>_raw / <col>, puis colonnes techniques et clé primaire."""
-    columns = []
-    for entry in contract["columns"]:
-        name = entry["target_name"]
-        comment = entry.get("description")
-        columns.append(Column(raw_name(name), Text, comment=f"Valeur d'origine de '{entry['source_name']}'"))
-        columns.append(Column(name, BRONZE_TYPES[entry["type"]](), comment=comment))
+    """Table bronze d'un contrat : une colonne TEXT par colonne source, puis colonnes techniques et clé primaire."""
+    columns = [Column(entry["target_name"], Text, comment=column_comment(entry)) for entry in contract["columns"]]
     return Table(
         contract["target"]["table"],
         metadata,
@@ -56,8 +37,6 @@ def contract_table(contract: dict, metadata: MetaData) -> Table:
         Column("_source_hash", Text, nullable=False, comment="SHA-256 des octets du fichier source"),
         Column("_row_number", BigInteger, nullable=False, comment="Numéro d'enregistrement dans la source (1 = première ligne de données)"),
         Column("_ingested_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
-        Column("_cast_errors", JSONB, nullable=False, server_default=text("'{}'::jsonb"),
-               comment="Erreurs de conversion par colonne ; {} si tout est bon"),
         PrimaryKeyConstraint("_source_hash", "_row_number"),
         comment=f"Bronze : {contract['source']['path']}" + (f" (table {contract['source']['table']})"
                                                             if contract["source"].get("table") else ""),
@@ -78,8 +57,6 @@ def registry_table(metadata: MetaData) -> Table:
         Column("rows_read", BigInteger),
         Column("rows_inserted", BigInteger),
         Column("rows_skipped", BigInteger, comment="Lignes déjà présentes (rejeu)"),
-        Column("cast_error_rows", BigInteger),
-        Column("max_cast_error_ratio", Double),
         Column("error", Text),
         Column("started_at", DateTime(timezone=True), nullable=False),
         Column("completed_at", DateTime(timezone=True)),

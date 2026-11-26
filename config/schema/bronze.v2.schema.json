@@ -47,7 +47,6 @@
         "natural_key": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/identifier"}}
       }
     },
-    "max_cast_error_ratio": {"type": "number", "minimum": 0, "maximum": 1, "default": 0},
     "columns": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/column"}},
     "derived_columns": {"type": "array", "items": {"$ref": "#/$defs/derived_column"}}
   },
@@ -55,8 +54,8 @@
     "identifier": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]*$",
-      "maxLength": 59,
-      "description": "Nom PostgreSQL en minuscules ; 59 caractères au plus pour que le miroir <nom>_raw tienne dans 63"
+      "maxLength": 63,
+      "description": "Nom PostgreSQL en minuscules, 63 caractères au plus ; le _ initial est réservé aux colonnes techniques"
     },
     "type": {"enum": ["IDENTIFIER", "CATEGORY", "TEXT", "NUMBER", "INTEGER", "BINARY", "DATE", "TIME", "TIMESTAMPTZ"]},
     "silver_type": {"type": "string", "minLength": 1},
@@ -67,7 +66,7 @@
       "properties": {
         "source_name": {"type": "string", "minLength": 1},
         "target_name": {"$ref": "#/$defs/identifier"},
-        "type": {"$ref": "#/$defs/type"},
+        "type": {"$ref": "#/$defs/type", "description": "Type visé en silver ; en bronze, toute colonne est TEXT"},
         "silver_type": {"$ref": "#/$defs/silver_type"},
         "unit": {"enum": ["CELSIUS", "BAR", "VOLT", "RPM", "HOUR"]},
         "nullable": {"type": "boolean"},

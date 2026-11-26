@@ -7,7 +7,7 @@ valider ne lève jamais d'exception, même sur une source illisible.
 | 1  | Conformité au JSON Schema |
 | 2  | Unicité des target_name (colonnes + dérivées) |
 | 3  | operate_on_columns référence une colonne déclarée |
-| 4  | Collision des miroirs <target>_raw |
+| 4  | Pas de collision avec les colonnes techniques (_batch_id...) |
 | 5  | natural_key référence des colonnes déclarées |
 | 6  | Compatibilité type <-> silver_type |
 | 7  | source_name existe dans le fichier |
@@ -27,6 +27,7 @@ from jsonschema import Draft202012Validator
 
 from indusense.bronze.contract import SCHEMA_PATH, ContractError, contract_paths, load_contract, source_path
 from indusense.bronze.probes import SourceInspectionError, probe_source
+from indusense.bronze.schema import TECHNICAL_COLUMNS
 
 # type du contrat -> silver_type compatibles (expressions régulières, majuscules)
 _CHAR = r"(TEXT|VARCHAR(\(\d+\))?|CHARACTER VARYING(\(\d+\))?|CHAR\(\d+\))"
@@ -95,12 +96,11 @@ def check_names(name: str, contract: dict) -> list[ValidationIssue]:
             if ref not in declared:
                 issues.append(ValidationIssue(name, f"derived_columns[{i}].operate_on_columns[{j}]", 3,
                                               f"'{ref}' is not a declared target_name in columns"))
-    # rule 4 : le miroir <target>_raw ne doit pas reprendre un autre nom
+    # rule 4 : les colonnes techniques sont réservées
     for i, entry in enumerate(columns):
-        raw = f"{entry['target_name']}_raw"
-        if raw in seen:
+        if entry["target_name"] in TECHNICAL_COLUMNS:
             issues.append(ValidationIssue(name, f"columns[{i}].target_name", 4,
-                                          f"physical column name '{raw}' collides with {seen[raw]}"))
+                                          f"'{entry['target_name']}' is reserved for a technical column"))
     # rule 5 : clé naturelle
     for i, ref in enumerate(contract["target"]["natural_key"]):
         if ref not in declared:

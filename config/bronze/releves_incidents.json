@@ -1,5 +1,5 @@
 {
-  "version": "2.0.0",
+  "version": "2.1.0",
   "kind": "BRONZE",
   "timezone": "UTC",
   "source": {
@@ -17,7 +17,6 @@
       "incident_id"
     ]
   },
-  "max_cast_error_ratio": 0.0,
   "columns": [
     {
       "source_name": "incident_id",

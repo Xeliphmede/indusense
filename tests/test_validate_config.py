@@ -1,4 +1,4 @@
-"""Les 10 règles de validation des contrats (docs/specs/01-INGESTION_PROCESS.md, section 3)."""
+"""Les 10 règles de validation des contrats (docs/01-INGESTION_PROCESS.md, section 3)."""
 
 import copy
 

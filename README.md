@@ -78,6 +78,12 @@ primaire est `(_source_hash, _row_number)`. Chaque lot est consigné dans `bronz
 Si un contrat change le DDL, la cellule de migration échoue sur `command.check` : générer la migration
 (`uv run alembic revision --autogenerate -m "..."`), la relire, la committer, puis relancer.
 
+La validation des contrats existe aussi en ligne de commande (code de sortie 1 s'il y a un problème) :
+
+```shell
+uv run indusense bronze validate
+```
+
 ### Tests
 
 ```shell

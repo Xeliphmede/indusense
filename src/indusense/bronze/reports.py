@@ -8,7 +8,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, select
 
 from indusense.bronze.loader import LoadResult
 from indusense.bronze.schema import HASH_COLUMN, TECHNICAL_COLUMNS, build_metadata, type_column
@@ -53,26 +53,41 @@ def transformations(contract: dict) -> list[dict]:
     return steps
 
 
+ORDERED_TYPES = {"NUMBER", "INTEGER", "DATE", "TIME", "TIMESTAMPTZ"}  # min / max ont un sens
+
+
 def column_statistics(contract: dict, result: LoadResult, engine: Engine) -> dict[str, dict]:
-    """Par colonne, sur les lignes du fichier chargé (_source_hash) : part de valeurs vides (NULL ou blanc),
-    nombre de valeurs distinctes, longueur maximale."""
+    """Par colonne, sur les lignes du fichier chargé (_source_hash). Le bronze étant en texte, les statistiques
+    de type sont calculées en convertissant chaque valeur vers le type du contrat (conversion silver), sans rien
+    écrire :
+
+    - empty_rate : part de valeurs vides (NULL ou blanc) ;
+    - cast_failures : nombre de valeurs non vides que silver ne saura pas convertir ;
+    - null_rate : part de valeurs qui seront NULL une fois typées (vides + non convertibles) ;
+    - min / max : sur les valeurs converties (types ordonnés uniquement) ;
+    - distinct_values, max_length : sur le texte stocké."""
+    from indusense.silver.casting import cast_value
+
     table = build_metadata([contract]).tables[f"bronze.{contract['target']['table']}"]
     stats = {}
     with engine.connect() as conn:
         for entry in contract["columns"]:
             col = table.c[entry["target_name"]]
-            blank = func.coalesce(func.btrim(col), "") == ""
-            query = select(
-                func.count(),
-                func.count().filter(blank),
-                func.count(func.distinct(col)).filter(~blank),
-                func.max(func.length(col)),
-            ).where(table.c._source_hash == result.source_hash)
-            total, empty, distinct, max_length = conn.execute(query).one()
+            values = conn.execute(select(col).where(table.c._source_hash == result.source_hash)).scalars().all()
+            total = len(values)
+            empty = sum(1 for v in values if v is None or not v.strip())
+            casts = [cast_value(v, entry["type"]) for v in values]
+            typed = [value for value, error in casts if value is not None]
+            failures = sum(1 for _, error in casts if error)
+            ordered = entry["type"] in ORDERED_TYPES and typed
             stats[entry["target_name"]] = {
                 "empty_rate": empty / total if total else None,
-                "distinct_values": distinct,
-                "max_length": max_length,
+                "cast_failures": failures,
+                "null_rate": (empty + failures) / total if total else None,
+                "min": min(typed) if ordered else None,
+                "max": max(typed) if ordered else None,
+                "distinct_values": len({v for v in values if v is not None and v.strip()}),
+                "max_length": max((len(v) for v in values if v is not None), default=None),
             }
     return stats
 

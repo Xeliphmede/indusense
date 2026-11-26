@@ -214,9 +214,24 @@ def test_reports_carry_transformations(engine, first_load, tmp_path):
     severity = next(c for c in dictionary["columns"] if c["target_name"] == "severity")
     assert (severity["bronze_type"], severity["silver_type"], severity["empty_rate"], severity["distinct_values"]) == (
         "TEXT", "INTEGER", 0.0, 4)
+    assert (severity["min"], severity["max"], severity["null_rate"], severity["cast_failures"]) == (2, 5, 0.0, 0)
+    date = next(c for c in dictionary["columns"] if c["target_name"] == "date")
+    assert (date["min"], date["max"]) == ("2025-06-01", "2026-06-08")
+    operator = next(c for c in dictionary["columns"] if c["target_name"] == "operator_name")
+    assert (operator["min"], operator["max"]) == (None, None)
     assert {t["layer"] for t in report["transformations"] if t["code"] == "COPY"} == {"bronze"}
     assert all(not t["executed"] for t in report["transformations"] if t["layer"] == "silver")
     assert next(c for c in dictionary["columns"] if c["target_name"] == "operator_badge")["personal_data"] is True
+
+
+def test_dictionary_counts_values_silver_cannot_type(engine, first_load, tmp_path):
+    _, dictionary_path = write_reports(load_contracts()["telemetry.json"], first_load["telemetry"], engine, tmp_path)
+    dictionary = json.loads(dictionary_path.read_text(encoding="utf-8"))
+    temperature = next(c for c in dictionary["columns"] if c["target_name"] == "temperature_c")
+    blanks = read_source_column("telemetry.json", "temperature_c").count("")
+    assert temperature["cast_failures"] == 0
+    assert temperature["null_rate"] == temperature["empty_rate"] == blanks / 135626
+    assert (temperature["min"], temperature["max"]) == (32.0, 80.0)
 
 
 def test_schema_matches_the_contracts(engine, first_load):

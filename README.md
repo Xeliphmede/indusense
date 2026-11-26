@@ -5,6 +5,9 @@ Projet de formation IA : ingestion de données industrielles (télémétrie mach
 **Sprint 1** : générer une *carte d'identité* Markdown pour chaque fichier de données : taille, charset,
 dimensions, types de colonnes inférés et statistiques des colonnes numériques et dates.
 
+**Ingestion bronze** : charger les fichiers tels quels dans le schéma `bronze` de PostgreSQL, à partir d'un
+contrat JSON généré depuis le profil de la carte d'identité (voir `bronze.ipynb`).
+
 ## Prérequis
 
 - [uv](https://docs.astral.sh/uv/)
@@ -44,6 +47,36 @@ Ouvrir `indusense.ipynb` dans VS Code, choisir le noyau de l'environnement `indu
 il explique la démarche et génère les cartes des trois fichiers de `datas/`. Il est versionné avec ses sorties :
 les cartes sont visibles sur GitHub sans l'exécuter.
 
+### Ingestion bronze
+
+1. Créer `.env` à partir du modèle (`cp .env.example .env`, puis remplacer chaque `change-me`) et démarrer
+   PostgreSQL : `sudo docker compose up -d db admin` (pgAdmin sur
+   http://localhost:8081).
+2. Ouvrir `bronze.ipynb` et tout exécuter. Le notebook enchaîne :
+   - le profil JSON des sources ;
+   - les décisions métier (clé naturelle, données personnelles, opérations silver) ;
+   - les contrats `config/bronze/*.json` ;
+   - la validation (10 règles) ;
+   - la migration Alembic ;
+   - le chargement et le rejeu ;
+   - les contrôles SQL ;
+   - les rapports `artifacts/ingestion/bronze/` ;
+   - les tests.
+
+Chaque colonne source donne deux colonnes : `<col>_raw` (texte d'origine) et `<col>` (valeur typée au mieux,
+`NULL` + motif dans `_cast_errors` si la conversion échoue). Rejouer le notebook ne crée aucun doublon : la clé
+primaire est `(_source_hash, _row_number)`. Chaque lot est consigné dans `bronze._ingestion_batch`.
+
+Si un contrat change le DDL, la cellule de migration échoue sur `command.check` : générer la migration
+(`uv run alembic revision --autogenerate -m "..."`), la relire, la committer, puis relancer.
+
+### Tests
+
+```shell
+uv run pytest            # les tests d'intégration créent puis suppriment une base indusense_test
+uv run pytest -m "not integration"
+```
+
 ### Skill Claude Code
 
 Le skill `carte-identite` (`.claude/skills/carte-identite/`) appelle la ligne de commande puis résume la carte.
@@ -65,9 +98,25 @@ src/indusense/
   sql.py                   lecture d'un script SQL (types déclarés, INSERT)
   profile.py               profil JSON d'un fichier
   card.py                  rendu Markdown du profil, écriture de la carte et du profil
+  settings.py              configuration lue dans .env (URL PostgreSQL)
+  bronze/
+    contract.py            contrat bronze : brouillon depuis le profil, lecture, écriture
+    probes.py              description de la source réelle (en-tête CSV, dump SQL)
+    validation.py          les 10 règles de validation des contrats
+    schema.py              métadonnée SQLAlchemy du schéma bronze, configuration Alembic
+    readers.py             lecture en flux des lignes brutes
+    casting.py             conversion au mieux des valeurs
+    loader.py              chargement idempotent, registre des lots
+    reports.py             rapport d'ingestion et dictionnaire de données
+config/
+  bronze/*.json            contrats d'ingestion (un par table cible)
+  schema/                  JSON Schema du contrat v2
+migrations/                migrations Alembic du schéma bronze
+alembic.ini                configuration Alembic (sans identifiants)
   cli.py                   ligne de commande indusense
 tests/                     tests pytest (uv run pytest)
 indusense.ipynb            explications et génération des cartes
+bronze.ipynb               ingestion bronze de bout en bout
 .claude/skills/            skill Claude Code carte-identite
 artifacts/                 cartes générées (non versionnées)
 ```
@@ -79,6 +128,10 @@ artifacts/                 cartes générées (non versionnées)
 | `pandas` | lecture et analyse des données |
 | `sqlglot` | analyse du script SQL sans base de données (choix justifié dans le notebook) |
 | `ipykernel` (dev) | exécution du notebook |
+| `sqlalchemy`, `psycopg[binary]` | accès PostgreSQL |
+| `alembic` | migrations du schéma bronze |
+| `pydantic-settings` | configuration lue dans `.env` |
+| `jsonschema` | validation des contrats |
 | `pytest` (dev) | tests |
 
 ## Contribution

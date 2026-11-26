@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://indusense.local/schema/bronze.v2.schema.json",
   "title": "Contrat d'ingestion bronze InduSense (v2)",
-  "description": "Une configuration par table cible. Voir docs/01-INGESTION_PROCESS.md, section 2.",
+  "description": "Une configuration par table cible. Voir docs/specs/01-INGESTION_PROCESS.md, section 2.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "kind", "timezone", "source", "target", "columns"],

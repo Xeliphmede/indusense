@@ -64,6 +64,19 @@ def test_rule4_technical_column_names_are_reserved_even_without_schema(contracts
     assert "'_row_number' is reserved for a technical column" in messages(check_names("telemetry.json", contract))
 
 
+def test_rule4_type_column_collision(contracts):
+    contract = copy.deepcopy(contracts["telemetry.json"])
+    contract["columns"][1]["target_name"] = "machine_id_type"
+    assert "type column 'machine_id_type' collides with columns[1].target_name" in messages(
+        validate_contract("telemetry.json", contract))
+
+
+def test_rule4_hash_is_reserved(contracts):
+    contract = copy.deepcopy(contracts["telemetry.json"])
+    contract["columns"][1]["target_name"] = "hash"
+    assert "'hash' is reserved for a technical column" in messages(validate_contract("telemetry.json", contract))
+
+
 def test_rule5_natural_key_references_declared_columns(contracts):
     contract = copy.deepcopy(contracts["telemetry.json"])
     contract["target"]["natural_key"] = ["ghost"]

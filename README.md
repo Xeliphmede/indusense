@@ -64,7 +64,9 @@ les cartes sont visibles sur GitHub sans l'exécuter.
    - les tests.
 
 Le bronze ne convertit rien : chaque colonne source devient une colonne `TEXT` qui reçoit la valeur d'origine
-(un champ vide reste `''`, `NULL` reste `NULL`). Le contrat déclare le type visé (`type`, `silver_type`), appliqué
+(un champ vide reste `''`, `NULL` reste `NULL`), suivie de `<col>_type`, le type déclaré par le contrat. La colonne
+`hash` porte l'empreinte de la ligne : SHA-256 du tableau JSON des valeurs stockées des seules colonnes du fichier
+(`src/indusense/bronze/fingerprint.py`). Le contrat déclare le type visé (`type`, `silver_type`), appliqué
 par la couche silver (`src/indusense/silver/casting.py`).
 
 Seule exception : les données personnelles marquées `pseudonymize` dans le contrat (`operator_name`,
@@ -113,6 +115,7 @@ src/indusense/
     readers.py             lecture en flux des lignes brutes
     loader.py              chargement idempotent, registre des lots
     pseudonymization.py    pseudonymisation HMAC-SHA256 salée des données personnelles
+    fingerprint.py         empreinte SHA-256 d'une ligne (colonne hash)
     reports.py             rapport d'ingestion et dictionnaire de données
   silver/
     casting.py             conversion au mieux des valeurs texte vers leur type (couche silver)

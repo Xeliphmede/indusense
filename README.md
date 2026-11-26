@@ -104,10 +104,7 @@ datas/
   telemetry.csv            télémétrie horaire des machines
   releves_incidents.csv    relevés d'incidents opérateurs
   machine.sql.txt          référentiel machines et maintenance (script PostgreSQL)
-docs/                      documentation (index : docs/README.md)
-  formation/               consignes et supports de la formation
-  specs/                   spécification de l'ingestion bronze
-  adr/                     décisions d'architecture
+  TODO-SPRINT1_1.md        consignes du sprint
 src/indusense/
   reading.py               taille, charset, séparateurs ; lecture et nettoyage d'un CSV en texte
   inference.py             inférence du type des colonnes

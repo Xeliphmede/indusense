@@ -15,7 +15,7 @@ from indusense.settings import PROJECT_ROOT
 
 CONFIG_DIR = PROJECT_ROOT / "config" / "bronze"
 SCHEMA_PATH = PROJECT_ROOT / "config" / "schema" / "bronze.v2.schema.json"
-CONTRACT_VERSION = "2.0.0"
+CONTRACT_VERSION = "2.1.0"  # 2.1 : bronze tout en texte, sans max_cast_error_ratio
 
 # type inféré (carte d'identité) -> type du contrat
 CONTRACT_TYPES = {
@@ -96,7 +96,6 @@ def draft_contract(profile: dict, table: str, decisions: dict | None = None) -> 
 
     - target_table : nom de la table cible (défaut : nom de la table du profil),
     - natural_key : clé métier, en target_name,
-    - max_cast_error_ratio : seuil d'erreurs de cast (défaut 0.0),
     - columns : {source_name: {clé: valeur}} fusionné dans l'entrée de la colonne (unit, description...),
     - derived_columns : opérations à exécuter en silver.
 
@@ -130,7 +129,6 @@ def draft_contract(profile: dict, table: str, decisions: dict | None = None) -> 
         "source": source,
         "target": {"schema": "bronze", "table": decisions.get("target_table", target_name(table)),
                    "natural_key": decisions.get("natural_key", [])},
-        "max_cast_error_ratio": decisions.get("max_cast_error_ratio", 0.0),
         "columns": columns,
     }
     if decisions.get("derived_columns"):

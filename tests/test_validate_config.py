@@ -49,11 +49,19 @@ def test_rule3_operate_on_unknown_column(contracts):
         validate_contract("releves_incidents.json", contract))
 
 
-def test_rule4_raw_mirror_collision(contracts):
+def test_rule4_technical_column_names_are_reserved(contracts):
     contract = copy.deepcopy(contracts["telemetry.json"])
-    contract["columns"][1]["target_name"] = "machine_id_raw"
-    assert "physical column name 'machine_id_raw' collides with columns[1].target_name" in messages(
-        validate_contract("telemetry.json", contract))
+    contract["columns"][1]["target_name"] = "_row_number"
+    issues = validate_contract("telemetry.json", contract)
+    assert [(i.rule, i.pointer) for i in issues] == [(1, "columns[1].target_name")]  # refusé dès le schéma
+
+
+def test_rule4_technical_column_names_are_reserved_even_without_schema(contracts):
+    from indusense.bronze.validation import check_names
+
+    contract = copy.deepcopy(contracts["telemetry.json"])
+    contract["columns"][1]["target_name"] = "_row_number"
+    assert "'_row_number' is reserved for a technical column" in messages(check_names("telemetry.json", contract))
 
 
 def test_rule5_natural_key_references_declared_columns(contracts):

@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime, time, timedelta, timezone
 
 import pytest
 
-from indusense.bronze.casting import cast_value
+from indusense.silver.casting import cast_value
 
 
 @pytest.mark.parametrize("col_type", ["NUMBER", "INTEGER", "BINARY", "DATE", "TIME", "TIMESTAMPTZ", "TEXT"])

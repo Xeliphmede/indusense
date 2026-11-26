@@ -1,4 +1,7 @@
-"""Conversion au mieux d'une valeur brute (texte) vers le type de sa colonne bronze.
+"""Conversion au mieux d'une valeur bronze (texte) vers le type déclaré par le contrat (`type`).
+
+Le bronze stocke tout en texte ; cette conversion est la première étape de la couche silver. Elle sert aussi,
+dès l'ingestion, à repérer les valeurs que silver ne pourra pas typer (voir bronze.ipynb, contrôles).
 
 `cast_value` retourne (valeur, erreur) :
 

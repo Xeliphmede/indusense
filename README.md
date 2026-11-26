@@ -63,8 +63,9 @@ les cartes sont visibles sur GitHub sans l'exécuter.
    - les rapports `artifacts/ingestion/bronze/` ;
    - les tests.
 
-Chaque colonne source donne deux colonnes : `<col>_raw` (texte d'origine) et `<col>` (valeur typée au mieux,
-`NULL` + motif dans `_cast_errors` si la conversion échoue). Rejouer le notebook ne crée aucun doublon : la clé
+Le bronze ne convertit rien : chaque colonne source devient une colonne `TEXT` qui reçoit la valeur d'origine
+(un champ vide reste `''`, `NULL` reste `NULL`). Le contrat déclare le type visé (`type`, `silver_type`), appliqué
+par la couche silver (`src/indusense/silver/casting.py`). Rejouer le notebook ne crée aucun doublon : la clé
 primaire est `(_source_hash, _row_number)`. Chaque lot est consigné dans `bronze._ingestion_batch`.
 
 Si un contrat change le DDL, la cellule de migration échoue sur `command.check` : générer la migration
@@ -105,9 +106,10 @@ src/indusense/
     validation.py          les 10 règles de validation des contrats
     schema.py              métadonnée SQLAlchemy du schéma bronze, configuration Alembic
     readers.py             lecture en flux des lignes brutes
-    casting.py             conversion au mieux des valeurs
     loader.py              chargement idempotent, registre des lots
     reports.py             rapport d'ingestion et dictionnaire de données
+  silver/
+    casting.py             conversion au mieux des valeurs texte vers leur type (couche silver)
 config/
   bronze/*.json            contrats d'ingestion (un par table cible)
   schema/                  JSON Schema du contrat v2

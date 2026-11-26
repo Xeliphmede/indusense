@@ -65,7 +65,12 @@ les cartes sont visibles sur GitHub sans l'exécuter.
 
 Le bronze ne convertit rien : chaque colonne source devient une colonne `TEXT` qui reçoit la valeur d'origine
 (un champ vide reste `''`, `NULL` reste `NULL`). Le contrat déclare le type visé (`type`, `silver_type`), appliqué
-par la couche silver (`src/indusense/silver/casting.py`). Rejouer le notebook ne crée aucun doublon : la clé
+par la couche silver (`src/indusense/silver/casting.py`).
+
+Seule exception : les données personnelles marquées `pseudonymize` dans le contrat (`operator_name`,
+`operator_badge`) ne sont jamais écrites en clair. Le bronze reçoit `HMAC-SHA256(ANONYMISATION_SALT, valeur)` :
+un même opérateur garde le même pseudonyme, sans que son nom soit stocké. Le sel (`ANONYMISATION_SALT` dans
+`.env`) est un secret : sans lui le chargement échoue, et le changer change tous les pseudonymes. Rejouer le notebook ne crée aucun doublon : la clé
 primaire est `(_source_hash, _row_number)`. Chaque lot est consigné dans `bronze._ingestion_batch`.
 
 Si un contrat change le DDL, la cellule de migration échoue sur `command.check` : générer la migration
@@ -107,6 +112,7 @@ src/indusense/
     schema.py              métadonnée SQLAlchemy du schéma bronze, configuration Alembic
     readers.py             lecture en flux des lignes brutes
     loader.py              chargement idempotent, registre des lots
+    pseudonymization.py    pseudonymisation HMAC-SHA256 salée des données personnelles
     reports.py             rapport d'ingestion et dictionnaire de données
   silver/
     casting.py             conversion au mieux des valeurs texte vers leur type (couche silver)

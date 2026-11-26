@@ -70,11 +70,23 @@
         "silver_type": {"$ref": "#/$defs/silver_type"},
         "unit": {"enum": ["CELSIUS", "BAR", "VOLT", "RPM", "HOUR"]},
         "nullable": {"type": "boolean"},
-        "personal_data": {"type": "boolean", "description": "Donnée personnelle (RGPD) : à traiter en silver"},
+        "personal_data": {"type": "boolean", "description": "Donnée personnelle (RGPD)"},
+        "pseudonymize": {
+          "type": "boolean",
+          "description": "Pseudonymisée à l'ingestion : HMAC-SHA256(ANONYMISATION_SALT, valeur), jamais écrite en clair"
+        },
         "description": {"type": "string"}
       },
-      "if": {"properties": {"type": {"const": "NUMBER"}}},
-      "then": {"required": ["unit"]}
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "NUMBER"}}}, "then": {"required": ["unit"]}},
+        {
+          "if": {"properties": {"pseudonymize": {"const": true}}, "required": ["pseudonymize"]},
+          "then": {
+            "required": ["personal_data"],
+            "properties": {"personal_data": {"const": true}, "type": {"enum": ["IDENTIFIER", "CATEGORY", "TEXT"]}}
+          }
+        }
+      ]
     },
     "derived_column": {
       "type": "object",

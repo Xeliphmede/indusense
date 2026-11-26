@@ -3,7 +3,9 @@
 - Tous les contrats sont validés avant toute lecture ou écriture : un seul problème, et rien n'est écrit.
 - Lecture en flux, écriture par lots de BATCH_SIZE lignes, `INSERT ... ON CONFLICT DO NOTHING` sur la clé
   primaire (_source_hash, _row_number) : rejouer un fichier déjà chargé n'insère rien.
-- Chaque valeur est copiée telle quelle, en texte : aucune conversion (le typage est fait en silver).
+- Chaque valeur est copiée telle quelle, en texte : aucune conversion (le typage est fait en silver). Seules
+  les colonnes `pseudonymize` du contrat sont remplacées par leur pseudonyme avant écriture : la valeur
+  d'origine n'entre jamais en base.
 - Une transaction par contrat : au moindre échec (ligne mal formée, fichier illisible...), tout est annulé
   (mieux vaut une table vide qu'une table à moitié chargée).
 - Le registre des lots est écrit dans des transactions séparées : un échec y reste consigné.
@@ -19,9 +21,11 @@ from sqlalchemy import Engine, MetaData, insert, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from indusense.bronze.contract import project_path, source_path
+from indusense.bronze.pseudonymization import check_salt, pseudonymize
 from indusense.bronze.readers import iter_rows
 from indusense.bronze.schema import REGISTRY_TABLE, build_metadata
 from indusense.bronze.validation import ValidationIssue, validate_contracts
+from indusense.settings import get_settings
 
 BATCH_SIZE = 5_000
 
@@ -66,14 +70,23 @@ def file_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
     return digest.hexdigest()
 
 
-def bronze_record(contract: dict, values: dict) -> dict:
-    """Colonnes bronze d'une ligne : {target_name: texte d'origine}."""
-    return {entry["target_name"]: values[entry["source_name"]] for entry in contract["columns"]}
+def bronze_record(contract: dict, values: dict, salt: str | None = None) -> dict:
+    """Colonnes bronze d'une ligne : {target_name: texte d'origine}, pseudonyme pour les colonnes `pseudonymize`."""
+    record = {}
+    for entry in contract["columns"]:
+        value = values[entry["source_name"]]
+        record[entry["target_name"]] = pseudonymize(value, salt) if entry.get("pseudonymize") else value
+    return record
 
 
-def load_one(name: str, contract: dict, engine: Engine, metadata: MetaData, batch_size: int = BATCH_SIZE) -> LoadResult:
+def pseudonymizes(contract: dict) -> bool:
+    return any(entry.get("pseudonymize") for entry in contract["columns"])
+
+
+def load_one(name: str, contract: dict, engine: Engine, metadata: MetaData, batch_size: int = BATCH_SIZE,
+             salt: str | None = None) -> LoadResult:
     """Charge un contrat (supposé valide) ; retourne le résultat, également consigné dans le registre.
-    Un échec de chargement (ligne mal formée, fichier illisible...) ne lève pas d'exception : la
+    Un échec de chargement (ligne mal formée, fichier illisible, sel absent...) ne lève pas d'exception : la
     transaction est annulée et le résultat porte status FAILED et le motif."""
     path = source_path(contract)
     table = metadata.tables[f"bronze.{contract['target']['table']}"]
@@ -104,11 +117,13 @@ def load_one(name: str, contract: dict, engine: Engine, metadata: MetaData, batc
         result.rows_skipped += len(chunk) - inserted
 
     try:
+        if pseudonymizes(contract):
+            salt = check_salt(salt)
         with engine.begin() as conn:  # chargement : une transaction pour tout le fichier
             chunk = []
             for number, values in iter_rows(contract, path):
                 result.rows_read += 1
-                chunk.append(bronze_record(contract, values) | technical | {"_row_number": number})
+                chunk.append(bronze_record(contract, values, salt) | technical | {"_row_number": number})
                 if len(chunk) >= batch_size:
                     flush(conn, chunk)
                     chunk = []
@@ -128,11 +143,14 @@ def load_one(name: str, contract: dict, engine: Engine, metadata: MetaData, batc
     return result
 
 
-def load_contracts_into(contracts: dict[str, dict], engine: Engine, batch_size: int = BATCH_SIZE) -> list[LoadResult]:
+def load_contracts_into(contracts: dict[str, dict], engine: Engine, batch_size: int = BATCH_SIZE,
+                        salt: str | None = None) -> list[LoadResult]:
     """Valide tous les contrats puis les charge un par un. Un contrat en échec n'empêche pas les suivants ;
-    les résultats (y compris les échecs) sont retournés dans l'ordre des contrats."""
+    les résultats (y compris les échecs) sont retournés dans l'ordre des contrats. Le sel de pseudonymisation
+    vient de .env (ANONYMISATION_SALT) s'il n'est pas fourni."""
     issues = validate_contracts(contracts)
     if issues:
         raise ValidationFailed(issues)
     metadata = build_metadata(contracts)
-    return [load_one(name, contract, engine, metadata, batch_size) for name, contract in contracts.items()]
+    salt = salt if salt is not None else get_settings().anonymisation_salt
+    return [load_one(name, contract, engine, metadata, batch_size, salt) for name, contract in contracts.items()]

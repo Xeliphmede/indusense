@@ -1,7 +1,7 @@
 """Schéma bronze construit à partir des contrats : métadonnée SQLAlchemy, comparée à la base par Alembic.
 
 Chaque colonne du contrat devient une colonne TEXT qui reçoit la valeur d'origine, intacte : le bronze ne
-convertit rien. Le type visé (`type`, `silver_type`) est un contrat pour la couche silver, qui fera le typage.
+convertit rien. Seule exception, les colonnes `pseudonymize` reçoivent un pseudonyme (voir pseudonymization.py). Le type visé (`type`, `silver_type`) est un contrat pour la couche silver, qui fera le typage.
 """
 
 from pathlib import Path
@@ -21,7 +21,10 @@ NAMING_CONVENTION = {"pk": "pk_%(table_name)s"}
 
 def column_comment(entry: dict) -> str:
     """Commentaire PostgreSQL d'une colonne bronze : sa colonne source, puis sa description éventuelle."""
-    comment = f"Valeur d'origine de '{entry['source_name']}'"
+    if entry.get("pseudonymize"):
+        comment = f"Pseudonyme HMAC-SHA256 salé de '{entry['source_name']}'"
+    else:
+        comment = f"Valeur d'origine de '{entry['source_name']}'"
     return f"{comment} : {entry['description']}" if entry.get("description") else comment
 
 

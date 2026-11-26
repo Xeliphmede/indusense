@@ -23,11 +23,15 @@ class InvalidReport(Exception):
 def transformations(contract: dict) -> list[dict]:
     """Ce que le bronze a fait à la donnée (copie en texte, traçabilité), puis ce que silver devra faire
     (typage vers silver_type, opérations dérivées), marqué non exécuté."""
-    steps = [
-        {"code": "COPY", "target": entry["target_name"], "source": [entry["source_name"]], "layer": "bronze",
-         "detail": "valeur d'origine copiée telle quelle en TEXT, aucune conversion"}
-        for entry in contract["columns"]
-    ]
+    steps = []
+    for entry in contract["columns"]:
+        if entry.get("pseudonymize"):
+            steps.append({"code": "ANO", "target": entry["target_name"], "source": [entry["source_name"]],
+                          "layer": "bronze", "detail": "pseudonymisation HMAC-SHA256(ANONYMISATION_SALT, valeur "
+                                                       "normalisée) ; la valeur d'origine n'est pas conservée"})
+        else:
+            steps.append({"code": "COPY", "target": entry["target_name"], "source": [entry["source_name"]],
+                          "layer": "bronze", "detail": "valeur d'origine copiée telle quelle en TEXT, aucune conversion"})
     steps.append({"code": "TRACE", "target": TECHNICAL_COLUMNS, "source": [contract["source"]["path"]],
                   "layer": "bronze", "detail": "ajout des colonnes de traçabilité (lot, fichier, SHA-256, numéro "
                                                "d'enregistrement, horodatage d'ingestion)"})
@@ -80,6 +84,7 @@ def build_data_dictionary(contract: dict, result: LoadResult, engine: Engine) ->
         {"source_name": entry["source_name"], "target_name": entry["target_name"],
          "bronze_type": "TEXT", "type": entry["type"], "unit": entry.get("unit"),
          "silver_type": entry["silver_type"], "personal_data": entry.get("personal_data", False),
+         "pseudonymized": entry.get("pseudonymize", False),
          "description": entry.get("description"), **stats.get(entry["target_name"], {})}
         for entry in contract["columns"]
     ]

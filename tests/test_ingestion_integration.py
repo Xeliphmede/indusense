@@ -6,6 +6,8 @@ Ignorés si PostgreSQL n'est pas joignable (docker compose up -d db).
 import copy
 import csv
 import json
+import re
+from contextlib import contextmanager
 
 import pytest
 from alembic import command
@@ -14,12 +16,14 @@ from sqlalchemy.exc import OperationalError
 
 from indusense.bronze.contract import load_contracts, source_path
 from indusense.bronze.loader import ValidationFailed, load_contracts_into
+from indusense.bronze.pseudonymization import pseudonymize
 from indusense.bronze.reports import write_reports
 from indusense.bronze.schema import alembic_config
 from indusense.settings import get_settings
 
 pytestmark = pytest.mark.integration
 TEST_DB = "indusense_test"
+SALT = get_settings().anonymisation_salt
 EXPECTED_ROWS = {"machine": 15, "maintenance": 115, "releves_incidents": 1245, "telemetry": 135626}
 
 
@@ -88,6 +92,34 @@ def test_blank_values_are_kept_as_empty_text(engine, first_load):
     assert blanks > 0
     assert scalar(engine, "SELECT count(*) FROM bronze.telemetry WHERE temperature_c = ''") == blanks
     assert scalar(engine, "SELECT count(*) FROM bronze.telemetry WHERE temperature_c IS NULL") == 0
+
+
+def test_no_operator_is_stored_in_clear(engine, first_load):
+    names = set(read_source_column("releves_incidents.json", "operator_name"))
+    badges = set(read_source_column("releves_incidents.json", "operator_badge"))
+    with engine.connect() as conn:
+        stored = set(conn.execute(text("SELECT operator_name FROM bronze.releves_incidents UNION "
+                                       "SELECT operator_badge FROM bronze.releves_incidents")).scalars())
+    assert not stored & (names | badges)
+    assert all(re.fullmatch(r"[0-9a-f]{64}", value) for value in stored)
+
+
+def test_pseudonyms_are_consistent_with_the_salt(engine, first_load):
+    with engine.connect() as conn:
+        name, badge = conn.execute(text("SELECT operator_name, operator_badge FROM bronze.releves_incidents "
+                                        "WHERE incident_id = 'INC-000001'")).one()
+    assert (name, badge) == (pseudonymize("Lucas Bernard", SALT), pseudonymize("OP1002", SALT))
+
+
+def test_missing_salt_writes_nothing(engine, first_load, tmp_path):
+    source = tmp_path / "incidents.csv"
+    lines = source_path(load_contracts()["releves_incidents.json"]).read_text(encoding="utf-8-sig").splitlines()
+    source.write_text("\n".join(lines[:3]).replace("INC-0000", "INC-9990") + "\n", encoding="utf-8")
+    contract = copy.deepcopy(load_contracts()["releves_incidents.json"])
+    contract["source"] |= {"path": str(source), "encoding": "utf-8"}
+    [result] = load_contracts_into({"incidents_no_salt.json": contract}, engine, salt="change-me")
+    assert result.status == "FAILED" and "MissingSalt" in result.error
+    assert scalar(engine, "SELECT count(*) FROM bronze.releves_incidents WHERE incident_id LIKE 'INC-9990%'") == 0
 
 
 def test_sql_null_stays_null(engine, first_load):
@@ -166,11 +198,10 @@ def test_schema_matches_the_contracts(engine, first_load):
     command.check(alembic_config(engine.url))
 
 
-def test_migration_0002_keeps_loaded_data():
-    """Une base chargée avec le schéma 0001 (colonnes _raw + typées) garde ses valeurs d'origine en 0002,
-    et le retour en 0001 recalcule les colonnes typées."""
+@contextmanager
+def scratch_database(database: str):
+    """Base vide créée pour un test puis supprimée : (configuration Alembic, engine)."""
     admin = create_engine(get_settings().url(), isolation_level="AUTOCOMMIT")
-    database = "indusense_test_migration"
     try:
         with admin.connect() as conn:
             conn.execute(text(f"DROP DATABASE IF EXISTS {database} WITH (FORCE)"))
@@ -178,9 +209,20 @@ def test_migration_0002_keeps_loaded_data():
     except OperationalError as error:
         pytest.skip(f"PostgreSQL injoignable : {error.orig}")
     url = get_settings().url(database=database)
-    config = alembic_config(url)
     engine = create_engine(url)
     try:
+        yield alembic_config(url), engine
+    finally:
+        engine.dispose()
+        with admin.connect() as conn:
+            conn.execute(text(f"DROP DATABASE IF EXISTS {database} WITH (FORCE)"))
+        admin.dispose()
+
+
+def test_migration_0002_keeps_loaded_data():
+    """Une base chargée avec le schéma 0001 (colonnes _raw + typées) garde ses valeurs d'origine en 0002,
+    et le retour en 0001 recalcule les colonnes typées."""
+    with scratch_database("indusense_test_migration") as (config, engine):
         command.upgrade(config, "0001")
         with engine.begin() as conn:
             conn.execute(text(
@@ -189,12 +231,11 @@ def test_migration_0002_keeps_loaded_data():
                 "pieces_produced, _batch_id, _source_file, _source_hash, _row_number) VALUES ('MACH-01', 'MACH-01', "
                 "'2025-06-01 00:00:00', '2025-06-01 00:00:00+00', '', NULL, '198.2', '227.5', '1541.7', '4', 4, "
                 "gen_random_uuid(), 'datas/telemetry.csv', 'abc', 1)"))
-        command.upgrade(config, "head")
+        command.upgrade(config, "0002")
         with engine.connect() as conn:
             row = conn.execute(text("SELECT machine_id, timestamp, temperature_c, pieces_produced "
                                     "FROM bronze.telemetry")).one()
         assert tuple(row) == ("MACH-01", "2025-06-01 00:00:00", "", "4")
-        command.check(config)
 
         command.downgrade(config, "0001")
         with engine.connect() as conn:
@@ -202,8 +243,28 @@ def test_migration_0002_keeps_loaded_data():
                                     "FROM bronze.telemetry")).one()
         assert row.timestamp_raw == "2025-06-01 00:00:00" and row.timestamp.isoformat() == "2025-06-01T00:00:00+00:00"
         assert (row.temperature_c_raw, row.temperature_c, row.pieces_produced) == ("", None, 4)
-    finally:
-        engine.dispose()
-        with admin.connect() as conn:
-            conn.execute(text(f"DROP DATABASE IF EXISTS {database} WITH (FORCE)"))
-        admin.dispose()
+
+
+def test_migration_0003_pseudonymizes_loaded_operators():
+    """Des incidents chargés en clair (schéma 0002) sont pseudonymisés par 0003, avec le même pseudonyme
+    que le chargement : recharger le fichier ensuite ne crée ni doublon ni second pseudonyme."""
+    with scratch_database("indusense_test_pseudonymization") as (config, engine):
+        command.upgrade(config, "0002")
+        contract = load_contracts()["releves_incidents.json"]
+        clear = copy.deepcopy(contract)
+        for entry in clear["columns"]:
+            entry.pop("pseudonymize", None)
+        assert load_contracts_into({"releves_incidents.json": clear}, engine)[0].status == "SUCCESS"
+        assert scalar(engine, "SELECT count(*) FROM bronze.releves_incidents WHERE operator_name = 'Lucas Bernard'") > 0
+
+        command.upgrade(config, "head")
+        command.check(config)
+        assert scalar(engine, "SELECT count(*) FROM bronze.releves_incidents WHERE operator_name = :p",
+                      p=pseudonymize("Lucas Bernard", SALT)) > 0
+        assert scalar(engine, "SELECT count(*) FROM bronze.releves_incidents "
+                              "WHERE operator_name !~ '^[0-9a-f]{64}$' OR operator_badge !~ '^[0-9a-f]{64}$'") == 0
+
+        [replay] = load_contracts_into({"releves_incidents.json": contract}, engine)
+        assert (replay.rows_inserted, replay.rows_skipped) == (0, 1245)
+        assert scalar(engine, "SELECT count(DISTINCT operator_name) FROM bronze.releves_incidents") == len(
+            {name.strip().casefold() for name in read_source_column("releves_incidents.json", "operator_name")})

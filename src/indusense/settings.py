@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     db_user: str = "indusense_user"
     db_password: str = "dbpassword"
     database_url: str | None = None  # prioritaire sur DB_* si renseignée
+    anonymisation_salt: str | None = None  # sel secret de la pseudonymisation (voir bronze/pseudonymization.py)
 
     def url(self, database: str | None = None) -> URL:
         """URL SQLAlchemy (driver psycopg 3) ; database remplace le nom de la base (ex. base de test)."""

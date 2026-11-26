@@ -45,10 +45,11 @@
       "source_name": "operator_name",
       "target_name": "operator_name",
       "type": "CATEGORY",
-      "silver_type": "TEXT",
+      "silver_type": "VARCHAR(64)",
       "nullable": false,
       "personal_data": true,
-      "description": "Nom de l'opérateur : donnée personnelle, supprimée en silver"
+      "pseudonymize": true,
+      "description": "Nom de l'opérateur, pseudonymisé à l'ingestion (HMAC-SHA256 salé)"
     },
     {
       "source_name": "machine_id",
@@ -69,10 +70,11 @@
       "source_name": "operator_badge",
       "target_name": "operator_badge",
       "type": "IDENTIFIER",
-      "silver_type": "TEXT",
+      "silver_type": "VARCHAR(64)",
       "nullable": false,
       "personal_data": true,
-      "description": "Matricule de l'opérateur : donnée personnelle, pseudonymisé en silver"
+      "pseudonymize": true,
+      "description": "Matricule de l'opérateur, pseudonymisé à l'ingestion (HMAC-SHA256 salé)"
     },
     {
       "source_name": "comment",
@@ -164,25 +166,6 @@
       ],
       "silver_type": "TIMESTAMPTZ",
       "description": "Concaténation 'date time', horloge UTC déclarée, aucune conversion"
-    },
-    {
-      "target_name": "operator_pseudonym",
-      "operation": "ANO",
-      "operate_on_columns": [
-        "operator_badge"
-      ],
-      "silver_type": "VARCHAR(64)",
-      "description": "SHA-256(badge + ANONYMISATION_SALT) : reste une donnée personnelle (pseudonyme)"
-    },
-    {
-      "target_name": "operator_identity",
-      "operation": "DEL",
-      "operate_on_columns": [
-        "operator_name",
-        "operator_badge"
-      ],
-      "silver_type": "TEXT",
-      "description": "Nom et matricule non repris en silver (minimisation RGPD)"
     },
     {
       "target_name": "comment_normalized",

@@ -11,3 +11,6 @@ wheels/
 
 # Generated artifacts
 artifacts/
+
+# Local configuration (secrets) : see .env.example
+.env

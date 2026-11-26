@@ -10,3 +10,10 @@ DATA_DIR = ROOT / "datas"
 def data_dir() -> Path:
     return DATA_DIR
 
+
+@pytest.fixture
+def contracts() -> dict[str, dict]:
+    """Copie des contrats du dépôt, modifiable par le test."""
+    from indusense.bronze.contract import load_contracts
+
+    return load_contracts()

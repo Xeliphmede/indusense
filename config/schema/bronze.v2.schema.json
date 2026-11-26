@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://indusense.local/schema/bronze.v2.schema.json",
+  "title": "Contrat d'ingestion bronze InduSense (v2)",
+  "description": "Une configuration par table cible. Voir docs/01-INGESTION_PROCESS.md, section 2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "kind", "timezone", "source", "target", "columns"],
+  "properties": {
+    "version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$"},
+    "kind": {"const": "BRONZE"},
+    "timezone": {"const": "UTC", "description": "Horloge déclarée de la source : étiquetée, jamais convertie (ADR-003)"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "format", "encoding"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "description": "Résolu depuis la racine du projet"},
+        "format": {"enum": ["CSV", "SQL"]},
+        "encoding": {"type": "string", "minLength": 1, "description": "Encodage explicite, jamais auto-détecté au chargement"},
+        "field_delimiter": {"type": "string", "minLength": 1, "maxLength": 1},
+        "row_delimiter": {"enum": ["\n", "\r\n"]},
+        "has_header": {"const": true},
+        "table": {"$ref": "#/$defs/identifier"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"format": {"const": "CSV"}}},
+          "then": {"required": ["field_delimiter", "row_delimiter", "has_header"], "not": {"required": ["table"]}}
+        },
+        {
+          "if": {"properties": {"format": {"const": "SQL"}}},
+          "then": {
+            "required": ["table"],
+            "not": {"anyOf": [{"required": ["field_delimiter"]}, {"required": ["row_delimiter"]}, {"required": ["has_header"]}]}
+          }
+        }
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "table", "natural_key"],
+      "properties": {
+        "schema": {"const": "bronze"},
+        "table": {"$ref": "#/$defs/identifier"},
+        "natural_key": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/identifier"}}
+      }
+    },
+    "max_cast_error_ratio": {"type": "number", "minimum": 0, "maximum": 1, "default": 0},
+    "columns": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/column"}},
+    "derived_columns": {"type": "array", "items": {"$ref": "#/$defs/derived_column"}}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "maxLength": 59,
+      "description": "Nom PostgreSQL en minuscules ; 59 caractères au plus pour que le miroir <nom>_raw tienne dans 63"
+    },
+    "type": {"enum": ["IDENTIFIER", "CATEGORY", "TEXT", "NUMBER", "INTEGER", "BINARY", "DATE", "TIME", "TIMESTAMPTZ"]},
+    "silver_type": {"type": "string", "minLength": 1},
+    "column": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_name", "target_name", "type", "silver_type"],
+      "properties": {
+        "source_name": {"type": "string", "minLength": 1},
+        "target_name": {"$ref": "#/$defs/identifier"},
+        "type": {"$ref": "#/$defs/type"},
+        "silver_type": {"$ref": "#/$defs/silver_type"},
+        "unit": {"enum": ["CELSIUS", "BAR", "VOLT", "RPM", "HOUR"]},
+        "nullable": {"type": "boolean"},
+        "personal_data": {"type": "boolean", "description": "Donnée personnelle (RGPD) : à traiter en silver"},
+        "description": {"type": "string"}
+      },
+      "if": {"properties": {"type": {"const": "NUMBER"}}},
+      "then": {"required": ["unit"]}
+    },
+    "derived_column": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_name", "operation", "operate_on_columns", "silver_type"],
+      "properties": {
+        "target_name": {"$ref": "#/$defs/identifier"},
+        "operation": {"enum": ["MERGE", "NORM", "STD", "ENC", "ANO", "DEL", "IMP", "OUT"]},
+        "operate_on_columns": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/identifier"}},
+        "silver_type": {"$ref": "#/$defs/silver_type"},
+        "description": {"type": "string"}
+      },
+      "if": {"properties": {"operation": {"const": "MERGE"}}},
+      "then": {"properties": {"operate_on_columns": {"minItems": 2}}}
+    }
+  }
+}

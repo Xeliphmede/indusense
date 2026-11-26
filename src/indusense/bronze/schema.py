@@ -1,7 +1,12 @@
 """Schéma bronze construit à partir des contrats : métadonnée SQLAlchemy, comparée à la base par Alembic.
 
-Chaque colonne du contrat devient une colonne TEXT qui reçoit la valeur d'origine, intacte : le bronze ne
-convertit rien. Seule exception, les colonnes `pseudonymize` reçoivent un pseudonyme (voir pseudonymization.py). Le type visé (`type`, `silver_type`) est un contrat pour la couche silver, qui fera le typage.
+Pour chaque colonne du contrat, deux colonnes TEXT, côte à côte :
+- `<col>` : la valeur d'origine, intacte (le bronze ne convertit rien) ; seule exception, les colonnes
+  `pseudonymize` reçoivent un pseudonyme (voir pseudonymization.py) ;
+- `<col>_type` : le type de `<col>` déclaré par le contrat (IDENTIFIER, NUMBER, DATE...), identique sur toutes
+  les lignes ; la conversion vers ce type est faite en silver.
+
+Puis `hash`, l'empreinte des colonnes du fichier pour la ligne (voir fingerprint.py), et les colonnes techniques.
 """
 
 from pathlib import Path
@@ -15,6 +20,8 @@ from indusense.settings import PROJECT_ROOT, get_settings
 SCHEMA = "bronze"
 REGISTRY_TABLE = "_ingestion_batch"
 TECHNICAL_COLUMNS = ["_batch_id", "_source_file", "_source_hash", "_row_number", "_ingested_at"]
+HASH_COLUMN = "hash"
+TYPE_SUFFIX = "_type"
 
 NAMING_CONVENTION = {"pk": "pk_%(table_name)s"}
 
@@ -28,13 +35,24 @@ def column_comment(entry: dict) -> str:
     return f"{comment} : {entry['description']}" if entry.get("description") else comment
 
 
+def type_column(target_name: str) -> str:
+    return f"{target_name}{TYPE_SUFFIX}"
+
+
 def contract_table(contract: dict, metadata: MetaData) -> Table:
-    """Table bronze d'un contrat : une colonne TEXT par colonne source, puis colonnes techniques et clé primaire."""
-    columns = [Column(entry["target_name"], Text, comment=column_comment(entry)) for entry in contract["columns"]]
+    """Table bronze d'un contrat : paires <col> / <col>_type, hash de la ligne, colonnes techniques, clé primaire."""
+    columns = []
+    for entry in contract["columns"]:
+        name = entry["target_name"]
+        columns.append(Column(name, Text, comment=column_comment(entry)))
+        columns.append(Column(type_column(name), Text, nullable=False,
+                              comment=f"Type de '{name}' déclaré par le contrat"))
     return Table(
         contract["target"]["table"],
         metadata,
         *columns,
+        Column(HASH_COLUMN, Text, nullable=False,
+               comment="SHA-256 des valeurs des colonnes du fichier pour cette ligne (colonnes ajoutées exclues)"),
         Column("_batch_id", Uuid, nullable=False, comment="Lot d'ingestion"),
         Column("_source_file", Text, nullable=False, comment="Fichier source, relatif à la racine du projet"),
         Column("_source_hash", Text, nullable=False, comment="SHA-256 des octets du fichier source"),

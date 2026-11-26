@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy import Engine, func, select
 
 from indusense.bronze.loader import LoadResult
-from indusense.bronze.schema import TECHNICAL_COLUMNS, build_metadata
+from indusense.bronze.schema import HASH_COLUMN, TECHNICAL_COLUMNS, build_metadata, type_column
 
 REPORTS_DIR = Path("artifacts/ingestion/bronze")
 
@@ -32,6 +32,12 @@ def transformations(contract: dict) -> list[dict]:
         else:
             steps.append({"code": "COPY", "target": entry["target_name"], "source": [entry["source_name"]],
                           "layer": "bronze", "detail": "valeur d'origine copiée telle quelle en TEXT, aucune conversion"})
+    steps.append({"code": "TYPE", "target": [type_column(e["target_name"]) for e in contract["columns"]],
+                  "source": ["contrat : columns[].type"], "layer": "bronze",
+                  "detail": "ajout, après chaque colonne, de son type déclaré par le contrat (identique sur toutes les lignes)"})
+    steps.append({"code": "HASH", "target": HASH_COLUMN, "source": [e["target_name"] for e in contract["columns"]],
+                  "layer": "bronze", "detail": "SHA-256 du tableau JSON des valeurs stockées des colonnes du fichier "
+                                               "(pseudonymes inclus, colonnes ajoutées exclues)"})
     steps.append({"code": "TRACE", "target": TECHNICAL_COLUMNS, "source": [contract["source"]["path"]],
                   "layer": "bronze", "detail": "ajout des colonnes de traçabilité (lot, fichier, SHA-256, numéro "
                                                "d'enregistrement, horodatage d'ingestion)"})
@@ -82,7 +88,8 @@ def build_data_dictionary(contract: dict, result: LoadResult, engine: Engine) ->
     stats = column_statistics(contract, result, engine) if result.status == "SUCCESS" else {}
     columns = [
         {"source_name": entry["source_name"], "target_name": entry["target_name"],
-         "bronze_type": "TEXT", "type": entry["type"], "unit": entry.get("unit"),
+         "bronze_type": "TEXT", "type_column": type_column(entry["target_name"]), "type": entry["type"],
+         "unit": entry.get("unit"),
          "silver_type": entry["silver_type"], "personal_data": entry.get("personal_data", False),
          "pseudonymized": entry.get("pseudonymize", False),
          "description": entry.get("description"), **stats.get(entry["target_name"], {})}

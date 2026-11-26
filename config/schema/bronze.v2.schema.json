@@ -54,8 +54,8 @@
     "identifier": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9_]*$",
-      "maxLength": 63,
-      "description": "Nom PostgreSQL en minuscules, 63 caractères au plus ; le _ initial est réservé aux colonnes techniques"
+      "maxLength": 58,
+      "description": "Nom PostgreSQL en minuscules ; 58 caractères au plus pour que <nom>_type tienne dans 63 ; le _ initial est réservé aux colonnes techniques"
     },
     "type": {"enum": ["IDENTIFIER", "CATEGORY", "TEXT", "NUMBER", "INTEGER", "BINARY", "DATE", "TIME", "TIMESTAMPTZ"]},
     "silver_type": {"type": "string", "minLength": 1},

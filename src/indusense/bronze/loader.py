@@ -21,9 +21,10 @@ from sqlalchemy import Engine, MetaData, insert, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from indusense.bronze.contract import project_path, source_path
+from indusense.bronze.fingerprint import row_fingerprint
 from indusense.bronze.pseudonymization import check_salt, pseudonymize
 from indusense.bronze.readers import iter_rows
-from indusense.bronze.schema import REGISTRY_TABLE, build_metadata
+from indusense.bronze.schema import HASH_COLUMN, REGISTRY_TABLE, build_metadata, type_column
 from indusense.bronze.validation import ValidationIssue, validate_contracts
 from indusense.settings import get_settings
 
@@ -71,11 +72,17 @@ def file_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
 
 
 def bronze_record(contract: dict, values: dict, salt: str | None = None) -> dict:
-    """Colonnes bronze d'une ligne : {target_name: texte d'origine}, pseudonyme pour les colonnes `pseudonymize`."""
-    record = {}
+    """Colonnes bronze d'une ligne : <col> (texte d'origine, pseudonyme pour les colonnes `pseudonymize`),
+    <col>_type (type déclaré par le contrat) et hash (empreinte des seules colonnes du fichier)."""
+    record, stored = {}, []
     for entry in contract["columns"]:
         value = values[entry["source_name"]]
-        record[entry["target_name"]] = pseudonymize(value, salt) if entry.get("pseudonymize") else value
+        if entry.get("pseudonymize"):
+            value = pseudonymize(value, salt)
+        record[entry["target_name"]] = value
+        record[type_column(entry["target_name"])] = entry["type"]
+        stored.append(value)
+    record[HASH_COLUMN] = row_fingerprint(stored)
     return record
 
 

@@ -6,6 +6,7 @@ Ignorés si PostgreSQL n'est pas joignable (docker compose up -d db).
 import copy
 import csv
 import json
+import uuid
 import re
 from contextlib import contextmanager
 
@@ -15,7 +16,9 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 
 from indusense.bronze.contract import load_contracts, source_path
-from indusense.bronze.loader import ValidationFailed, load_contracts_into
+from indusense.bronze.fingerprint import row_fingerprint
+from indusense.bronze.loader import ValidationFailed, bronze_record, file_sha256, load_contracts_into
+from indusense.bronze.readers import iter_rows
 from indusense.bronze.pseudonymization import pseudonymize
 from indusense.bronze.reports import write_reports
 from indusense.bronze.schema import alembic_config
@@ -120,6 +123,29 @@ def test_missing_salt_writes_nothing(engine, first_load, tmp_path):
     [result] = load_contracts_into({"incidents_no_salt.json": contract}, engine, salt="change-me")
     assert result.status == "FAILED" and "MissingSalt" in result.error
     assert scalar(engine, "SELECT count(*) FROM bronze.releves_incidents WHERE incident_id LIKE 'INC-9990%'") == 0
+
+
+def test_type_column_follows_each_source_column(engine, first_load):
+    for contract in load_contracts().values():
+        table = contract["target"]["table"]
+        with engine.connect() as conn:
+            columns = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema = "
+                                        "'bronze' AND table_name = :t ORDER BY ordinal_position"), {"t": table}).scalars().all()
+        expected = [name for e in contract["columns"] for name in (e["target_name"], f"{e['target_name']}_type")]
+        assert columns[:len(expected) + 1] == expected + ["hash"], table
+        for entry in contract["columns"]:
+            types = scalar(engine, f'SELECT array_agg(DISTINCT "{entry["target_name"]}_type") FROM bronze.{table}')
+            assert types == [entry["type"]], (table, entry["target_name"])
+
+
+def test_hash_is_the_fingerprint_of_the_file_columns(engine, first_load):
+    for name in ("releves_incidents.json", "maintenance.json"):
+        contract = load_contracts()[name]
+        columns = [e["target_name"] for e in contract["columns"]]
+        with engine.connect() as conn:
+            rows = conn.execute(text(f"SELECT hash, {', '.join(f'\"{c}\"' for c in columns)} "
+                                     f"FROM bronze.{contract['target']['table']}")).all()
+        assert all(row[0] == row_fingerprint(row[1:]) for row in rows), name
 
 
 def test_sql_null_stays_null(engine, first_load):
@@ -245,16 +271,33 @@ def test_migration_0002_keeps_loaded_data():
         assert (row.temperature_c_raw, row.temperature_c, row.pieces_produced) == ("", None, 4)
 
 
+def insert_as_before(engine, contract: dict, salt: str | None = None) -> None:
+    """Insère les lignes du fichier comme le faisait le chargement avant 0004 : colonnes du fichier (pseudonymisées
+    si salt est donné) et colonnes techniques, sans <col>_type ni hash."""
+    path = source_path(contract)
+    table = contract["target"]["table"]
+    names = [entry["target_name"] for entry in contract["columns"]]
+    rows = []
+    for number, values in iter_rows(contract, path):
+        row = {}
+        for entry in contract["columns"]:
+            value = values[entry["source_name"]]
+            row[entry["target_name"]] = pseudonymize(value, salt) if salt and entry.get("pseudonymize") else value
+        rows.append(row | {"_batch_id": uuid.uuid4(), "_source_file": "datas/x", "_source_hash": file_sha256(path),
+                           "_row_number": number})
+    columns = names + ["_batch_id", "_source_file", "_source_hash", "_row_number"]
+    with engine.begin() as conn:
+        conn.execute(text(f"INSERT INTO bronze.{table} ({', '.join(f'\"{c}\"' for c in columns)}) "
+                          f"VALUES ({', '.join(f':{c}' for c in columns)})"), rows)
+
+
 def test_migration_0003_pseudonymizes_loaded_operators():
     """Des incidents chargés en clair (schéma 0002) sont pseudonymisés par 0003, avec le même pseudonyme
     que le chargement : recharger le fichier ensuite ne crée ni doublon ni second pseudonyme."""
     with scratch_database("indusense_test_pseudonymization") as (config, engine):
         command.upgrade(config, "0002")
         contract = load_contracts()["releves_incidents.json"]
-        clear = copy.deepcopy(contract)
-        for entry in clear["columns"]:
-            entry.pop("pseudonymize", None)
-        assert load_contracts_into({"releves_incidents.json": clear}, engine)[0].status == "SUCCESS"
+        insert_as_before(engine, contract)
         assert scalar(engine, "SELECT count(*) FROM bronze.releves_incidents WHERE operator_name = 'Lucas Bernard'") > 0
 
         command.upgrade(config, "head")
@@ -268,3 +311,28 @@ def test_migration_0003_pseudonymizes_loaded_operators():
         assert (replay.rows_inserted, replay.rows_skipped) == (0, 1245)
         assert scalar(engine, "SELECT count(DISTINCT operator_name) FROM bronze.releves_incidents") == len(
             {name.strip().casefold() for name in read_source_column("releves_incidents.json", "operator_name")})
+
+
+def test_migration_0004_adds_types_and_the_same_hash_as_the_loader():
+    """Les lignes chargées avant 0004 reçoivent <col>_type et hash, avec l'empreinte que calcule le chargement."""
+    with scratch_database("indusense_test_type_hash") as (config, engine):
+        command.upgrade(config, "0003")
+        contract = load_contracts()["maintenance.json"]
+        insert_as_before(engine, contract)
+
+        command.upgrade(config, "head")
+        command.check(config)
+        expected = {number: bronze_record(contract, values)
+                    for number, values in iter_rows(contract, source_path(contract))}
+        with engine.connect() as conn:
+            stored = conn.execute(text("SELECT * FROM bronze.maintenance ORDER BY _row_number")).mappings().all()
+        assert len(stored) == 115
+        for row in stored:
+            assert {key: row[key] for key in expected[row["_row_number"]]} == expected[row["_row_number"]]
+
+        command.downgrade(config, "0003")
+        with engine.connect() as conn:
+            columns = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_schema = "
+                                        "'bronze' AND table_name = 'maintenance' ORDER BY ordinal_position")).scalars().all()
+        assert columns == [e["target_name"] for e in contract["columns"]] + [
+            "_batch_id", "_source_file", "_source_hash", "_row_number", "_ingested_at"]

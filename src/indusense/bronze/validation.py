@@ -7,7 +7,7 @@ valider ne lève jamais d'exception, même sur une source illisible.
 | 1  | Conformité au JSON Schema |
 | 2  | Unicité des target_name (colonnes + dérivées) |
 | 3  | operate_on_columns référence une colonne déclarée |
-| 4  | Pas de collision avec les colonnes techniques (_batch_id...) |
+| 4  | Pas de collision avec les colonnes ajoutées (<col>_type, hash, _batch_id...) |
 | 5  | natural_key référence des colonnes déclarées |
 | 6  | Compatibilité type <-> silver_type |
 | 7  | source_name existe dans le fichier |
@@ -27,7 +27,7 @@ from jsonschema import Draft202012Validator
 
 from indusense.bronze.contract import SCHEMA_PATH, ContractError, contract_paths, load_contract, source_path
 from indusense.bronze.probes import SourceInspectionError, probe_source
-from indusense.bronze.schema import TECHNICAL_COLUMNS
+from indusense.bronze.schema import HASH_COLUMN, TECHNICAL_COLUMNS, type_column
 
 # type du contrat -> silver_type compatibles (expressions régulières, majuscules)
 _CHAR = r"(TEXT|VARCHAR(\(\d+\))?|CHARACTER VARYING(\(\d+\))?|CHAR\(\d+\))"
@@ -96,11 +96,14 @@ def check_names(name: str, contract: dict) -> list[ValidationIssue]:
             if ref not in declared:
                 issues.append(ValidationIssue(name, f"derived_columns[{i}].operate_on_columns[{j}]", 3,
                                               f"'{ref}' is not a declared target_name in columns"))
-    # rule 4 : les colonnes techniques sont réservées
+    # rule 4 : les colonnes ajoutées par le bronze sont réservées
     for i, entry in enumerate(columns):
-        if entry["target_name"] in TECHNICAL_COLUMNS:
-            issues.append(ValidationIssue(name, f"columns[{i}].target_name", 4,
-                                          f"'{entry['target_name']}' is reserved for a technical column"))
+        where = f"columns[{i}].target_name"
+        if entry["target_name"] in TECHNICAL_COLUMNS or entry["target_name"] == HASH_COLUMN:
+            issues.append(ValidationIssue(name, where, 4, f"'{entry['target_name']}' is reserved for a technical column"))
+        added = type_column(entry["target_name"])
+        if added in seen:
+            issues.append(ValidationIssue(name, where, 4, f"type column '{added}' collides with {seen[added]}"))
     # rule 5 : clé naturelle
     for i, ref in enumerate(contract["target"]["natural_key"]):
         if ref not in declared:

@@ -91,8 +91,7 @@ def infer_column_type(series: pd.Series) -> str:
     return "CATEGORY" if text.nunique() <= max(CATEGORY_MIN, CATEGORY_RATIO * len(values)) else "TEXT"
 
 
-def type_label(series: pd.Series, col_type: str, invalid: int = 0) -> str:
-    """Type inféré, complété des remarques de lecture : valeurs illisibles (invalid pour une colonne numérique),
+def type_notes(series: pd.Series, col_type: str, invalid: int = 0) -> list[str]:
+    """Remarques de lecture d'une colonne : valeurs illisibles (invalid pour une colonne numérique),
     et pour une heure / date ambiguïté jour/mois et fuseau."""
-    notes = parse_temporal(series).notes if col_type in TEMPORAL_TYPES else invalid_note(invalid)
-    return f"{col_type} ({', '.join(notes)})" if notes else col_type
+    return parse_temporal(series).notes if col_type in TEMPORAL_TYPES else invalid_note(invalid)

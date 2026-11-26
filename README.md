@@ -22,7 +22,9 @@ uv sync
 ## Utilisation
 
 Les cartes sont écrites dans `artifacts/ingestion/identities/<AAAAMMJJ>/<fichier>_<HHMMSS>.md`
-(dossier ignoré par git), relatif au dossier courant.
+(dossier ignoré par git), relatif au dossier courant, accompagnées du **profil JSON** du fichier
+(`<fichier>_<HHMMSS>.json`) : les mêmes informations, lisibles par un programme, qui servent de base au contrat
+d'ingestion bronze.
 
 ### Ligne de commande
 
@@ -57,13 +59,14 @@ datas/
   machine.sql.txt          référentiel machines et maintenance (script PostgreSQL)
   TODO-SPRINT1_1.md        consignes du sprint
 src/indusense/
-  __init__.py              describer : choix du traitement selon le format du fichier
-  reading.py               taille, charset et séparateur
+  reading.py               taille, charset, séparateurs ; lecture et nettoyage d'un CSV en texte
   inference.py             inférence du type des colonnes
   stats.py                 statistiques des colonnes numériques et dates
-  card.py                  construction de la carte, lecture des CSV
-  sql.py                   carte d'un script SQL
+  sql.py                   lecture d'un script SQL (types déclarés, INSERT)
+  profile.py               profil JSON d'un fichier
+  card.py                  rendu Markdown du profil, écriture de la carte et du profil
   cli.py                   ligne de commande indusense
+tests/                     tests pytest (uv run pytest)
 indusense.ipynb            explications et génération des cartes
 .claude/skills/            skill Claude Code carte-identite
 artifacts/                 cartes générées (non versionnées)
@@ -76,6 +79,7 @@ artifacts/                 cartes générées (non versionnées)
 | `pandas` | lecture et analyse des données |
 | `sqlglot` | analyse du script SQL sans base de données (choix justifié dans le notebook) |
 | `ipykernel` (dev) | exécution du notebook |
+| `pytest` (dev) | tests |
 
 ## Contribution
 

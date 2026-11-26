@@ -1,14 +1,17 @@
-"""Chargement d'un contrat dans sa table bronze.
+"""Chargement des contrats dans leurs tables bronze, par exécution (batch).
 
 - Tous les contrats sont validés avant toute lecture ou écriture : un seul problème, et rien n'est écrit.
-- Lecture en flux, écriture par lots de BATCH_SIZE lignes, `INSERT ... ON CONFLICT DO NOTHING` sur la clé
-  primaire (_source_hash, _row_number) : rejouer un fichier déjà chargé n'insère rien.
+- Une exécution = un `batch_id` (UUID), commun à toutes les tables, et une heure `_ingested_at`. Chaque exécution
+  insère toutes les lignes des fichiers (le bronze est un historique en ajout seul, clé primaire `_id`
+  auto-générée) : `WHERE _batch_id = ...` retrouve, dans chaque table, les lignes de cette ingestion, et le
+  registre `_ingestion_batch` dit quels fichiers (chemin et SHA-256) elle a utilisés.
+- Lecture en flux, écriture par lots de BATCH_SIZE lignes.
 - Chaque valeur est copiée telle quelle, en texte : aucune conversion (le typage est fait en silver). Seules
   les colonnes `pseudonymize` du contrat sont remplacées par leur pseudonyme avant écriture : la valeur
   d'origine n'entre jamais en base.
-- Une transaction par contrat : au moindre échec (ligne mal formée, fichier illisible...), tout est annulé
-  (mieux vaut une table vide qu'une table à moitié chargée).
-- Le registre des lots est écrit dans des transactions séparées : un échec y reste consigné.
+- Une seule transaction pour toute l'exécution : au moindre échec (ligne mal formée, fichier illisible, sel
+  absent...), aucune table ne garde ce batch (un batch présent dans une partie des tables serait trompeur).
+- Le registre est écrit dans des transactions séparées : un échec y reste consigné.
 """
 
 import hashlib
@@ -17,8 +20,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import Engine, MetaData, insert, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import Engine, Table, insert, update
 
 from indusense.bronze.contract import project_path, source_path
 from indusense.bronze.fingerprint import row_fingerprint
@@ -43,13 +45,12 @@ class ValidationFailed(Exception):
 class LoadResult:
     contract: str
     target_table: str
-    batch_id: str
-    status: str
+    batch_id: uuid.UUID  # exécution d'ingestion, commune à toutes les tables
+    status: str         # RUNNING, SUCCESS, FAILED (ce contrat a échoué), ROLLED_BACK (un autre contrat a échoué)
     source_file: str
     source_hash: str
     rows_read: int = 0
     rows_inserted: int = 0
-    rows_skipped: int = 0
     error: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -60,6 +61,14 @@ class LoadResult:
 
     def as_dict(self) -> dict:
         return asdict(self) | {"duration_s": self.duration_s}
+
+
+class ContractLoadError(Exception):
+    """Échec du chargement d'un contrat : toute l'exécution est annulée."""
+
+    def __init__(self, result: LoadResult, error: Exception):
+        self.result = result
+        super().__init__(f"{type(error).__name__}: {error}")
 
 
 def file_sha256(path: Path, chunk_size: int = 1 << 20) -> str:
@@ -90,74 +99,78 @@ def pseudonymizes(contract: dict) -> bool:
     return any(entry.get("pseudonymize") for entry in contract["columns"])
 
 
-def load_one(name: str, contract: dict, engine: Engine, metadata: MetaData, batch_size: int = BATCH_SIZE,
-             salt: str | None = None) -> LoadResult:
-    """Charge un contrat (supposé valide) ; retourne le résultat, également consigné dans le registre.
-    Un échec de chargement (ligne mal formée, fichier illisible, sel absent...) ne lève pas d'exception : la
-    transaction est annulée et le résultat porte status FAILED et le motif."""
+def load_rows(conn, contract: dict, table: Table, result: LoadResult, salt: str | None, batch_size: int,
+              ingested_at: datetime) -> None:
+    """Insère toutes les lignes du fichier d'un contrat, marquées du batch_id et de l'heure de l'exécution."""
     path = source_path(contract)
-    table = metadata.tables[f"bronze.{contract['target']['table']}"]
-    registry = metadata.tables[f"bronze.{REGISTRY_TABLE}"]
-    result = LoadResult(
-        contract=name,
-        target_table=table.fullname,
-        batch_id=str(uuid.uuid4()),
-        status="RUNNING",
-        source_file=project_path(path),
-        source_hash=file_sha256(path),
-        started_at=datetime.now(UTC),
-    )
-    batch_id = uuid.UUID(result.batch_id)
-    with engine.begin() as conn:  # registre : transaction séparée
-        conn.execute(insert(registry).values(
-            batch_id=batch_id, contract=name, target_table=result.target_table, source_file=result.source_file,
-            source_hash=result.source_hash, status="RUNNING", started_at=result.started_at,
-        ))
-
-    statement = pg_insert(table).on_conflict_do_nothing().returning(table.c._row_number)
-    technical = {"_batch_id": batch_id, "_source_file": result.source_file, "_source_hash": result.source_hash,
-                 "_ingested_at": result.started_at}
-
-    def flush(conn, chunk: list[dict]) -> None:
-        inserted = len(conn.execute(statement, chunk).all())
-        result.rows_inserted += inserted
-        result.rows_skipped += len(chunk) - inserted
-
-    try:
-        if pseudonymizes(contract):
-            salt = check_salt(salt)
-        with engine.begin() as conn:  # chargement : une transaction pour tout le fichier
+    if pseudonymizes(contract):
+        salt = check_salt(salt)
+    technical = {"_batch_id": result.batch_id, "_source_file": result.source_file, "_source_hash": result.source_hash,
+                 "_ingested_at": ingested_at}
+    chunk = []
+    for number, values in iter_rows(contract, path):
+        result.rows_read += 1
+        chunk.append(bronze_record(contract, values, salt) | technical | {"_row_number": number})
+        if len(chunk) >= batch_size:
+            conn.execute(insert(table), chunk)
+            result.rows_inserted += len(chunk)
             chunk = []
-            for number, values in iter_rows(contract, path):
-                result.rows_read += 1
-                chunk.append(bronze_record(contract, values, salt) | technical | {"_row_number": number})
-                if len(chunk) >= batch_size:
-                    flush(conn, chunk)
-                    chunk = []
-            if chunk:
-                flush(conn, chunk)
-        result.status = "SUCCESS"
-    except Exception as error:  # transaction annulée : rien n'a été écrit, le motif est consigné
-        result.status, result.error = "FAILED", f"{type(error).__name__}: {error}"
-        result.rows_inserted = result.rows_skipped = 0
-    result.completed_at = datetime.now(UTC)
-    with engine.begin() as conn:
-        conn.execute(update(registry).where(registry.c.batch_id == batch_id).values(
-            status=result.status, rows_read=result.rows_read, rows_inserted=result.rows_inserted,
-            rows_skipped=result.rows_skipped, error=result.error,
-            completed_at=result.completed_at,
-        ))
-    return result
+    if chunk:
+        conn.execute(insert(table), chunk)
+        result.rows_inserted += len(chunk)
 
 
 def load_contracts_into(contracts: dict[str, dict], engine: Engine, batch_size: int = BATCH_SIZE,
                         salt: str | None = None) -> list[LoadResult]:
-    """Valide tous les contrats puis les charge un par un. Un contrat en échec n'empêche pas les suivants ;
-    les résultats (y compris les échecs) sont retournés dans l'ordre des contrats. Le sel de pseudonymisation
-    vient de .env (ANONYMISATION_SALT) s'il n'est pas fourni."""
+    """Valide tous les contrats, puis les charge tous sous un même batch_id, dans une seule transaction.
+    Retourne un résultat par contrat, dans l'ordre des contrats, également consigné dans le registre. Un échec
+    ne lève pas d'exception : l'exécution est annulée, le contrat fautif porte status FAILED et son motif, les
+    autres ROLLED_BACK. Le sel de pseudonymisation vient de .env (ANONYMISATION_SALT) s'il n'est pas fourni."""
     issues = validate_contracts(contracts)
     if issues:
         raise ValidationFailed(issues)
     metadata = build_metadata(contracts)
+    registry = metadata.tables[f"bronze.{REGISTRY_TABLE}"]
     salt = salt if salt is not None else get_settings().anonymisation_salt
-    return [load_one(name, contract, engine, metadata, batch_size, salt) for name, contract in contracts.items()]
+    batch_id, ingested_at = uuid.uuid4(), datetime.now(UTC)
+
+    results = []
+    for name, contract in contracts.items():
+        path = source_path(contract)
+        results.append(LoadResult(contract=name, target_table=f"bronze.{contract['target']['table']}",
+                                  batch_id=batch_id, status="RUNNING", source_file=project_path(path),
+                                  source_hash=file_sha256(path), started_at=ingested_at))
+    with engine.begin() as conn:  # registre : transaction séparée
+        conn.execute(insert(registry), [
+            {"batch_id": batch_id, "contract": r.contract, "target_table": r.target_table, "source_file": r.source_file,
+             "source_hash": r.source_hash, "status": "RUNNING", "started_at": r.started_at} for r in results])
+
+    try:
+        with engine.begin() as conn:  # chargement : une transaction pour toute l'exécution
+            for result, contract in zip(results, contracts.values()):
+                result.started_at = datetime.now(UTC)
+                try:
+                    load_rows(conn, contract, metadata.tables[result.target_table], result, salt, batch_size,
+                              ingested_at)
+                except Exception as error:
+                    raise ContractLoadError(result, error) from error
+                result.completed_at = datetime.now(UTC)
+        for result in results:
+            result.status = "SUCCESS"
+    except ContractLoadError as failure:
+        for result in results:
+            result.rows_inserted = 0
+            if result is failure.result:
+                result.status, result.error = "FAILED", str(failure)
+            else:
+                result.status, result.error = "ROLLED_BACK", f"batch rolled back: {failure.result.contract} failed"
+    finally:
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            for result in results:
+                result.completed_at = result.completed_at or now
+                conn.execute(update(registry).where(registry.c.batch_id == batch_id,
+                                                    registry.c.contract == result.contract).values(
+                    status=result.status, rows_read=result.rows_read, rows_inserted=result.rows_inserted,
+                    error=result.error, completed_at=result.completed_at))
+    return results

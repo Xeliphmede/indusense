@@ -39,8 +39,9 @@ def transformations(contract: dict) -> list[dict]:
                   "layer": "bronze", "detail": "SHA-256 du tableau JSON des valeurs stockées des colonnes du fichier "
                                                "(pseudonymes inclus, colonnes ajoutées exclues)"})
     steps.append({"code": "TRACE", "target": TECHNICAL_COLUMNS, "source": [contract["source"]["path"]],
-                  "layer": "bronze", "detail": "ajout des colonnes de traçabilité (lot, fichier, SHA-256, numéro "
-                                               "d'enregistrement, horodatage d'ingestion)"})
+                  "layer": "bronze", "detail": "ajout des colonnes de traçabilité (fichier, SHA-256 du fichier, "
+                                               "numéro d'enregistrement, batch_id de l'exécution, heure "
+                                               "d'ingestion, identifiant _id auto-généré)"})
     for entry in contract["columns"]:
         detail = f"conversion en {entry['silver_type']} (type {entry['type']})"
         if entry["type"] == "TIMESTAMPTZ":
@@ -57,7 +58,7 @@ ORDERED_TYPES = {"NUMBER", "INTEGER", "DATE", "TIME", "TIMESTAMPTZ"}  # min / ma
 
 
 def column_statistics(contract: dict, result: LoadResult, engine: Engine) -> dict[str, dict]:
-    """Par colonne, sur les lignes du fichier chargé (_source_hash). Le bronze étant en texte, les statistiques
+    """Par colonne, sur les lignes de l'exécution (_batch_id). Le bronze étant en texte, les statistiques
     de type sont calculées en convertissant chaque valeur vers le type du contrat (conversion silver), sans rien
     écrire :
 
@@ -73,7 +74,7 @@ def column_statistics(contract: dict, result: LoadResult, engine: Engine) -> dic
     with engine.connect() as conn:
         for entry in contract["columns"]:
             col = table.c[entry["target_name"]]
-            values = conn.execute(select(col).where(table.c._source_hash == result.source_hash)).scalars().all()
+            values = conn.execute(select(col).where(table.c._batch_id == result.batch_id)).scalars().all()
             total = len(values)
             empty = sum(1 for v in values if v is None or not v.strip())
             casts = [cast_value(v, entry["type"]) for v in values]

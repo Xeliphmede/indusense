@@ -12,14 +12,15 @@ Puis `hash`, l'empreinte des colonnes du fichier pour la ligne (voir fingerprint
 from pathlib import Path
 
 from alembic.config import Config
-from sqlalchemy import BigInteger, Column, DateTime, MetaData, PrimaryKeyConstraint, Table, Text, Uuid, text
+from sqlalchemy import (BigInteger, Column, DateTime, Identity, Index, MetaData, PrimaryKeyConstraint, Table, Text,
+                        Uuid, text)
 from sqlalchemy.engine import URL
 
 from indusense.settings import PROJECT_ROOT, get_settings
 
 SCHEMA = "bronze"
 REGISTRY_TABLE = "_ingestion_batch"
-TECHNICAL_COLUMNS = ["_batch_id", "_source_file", "_source_hash", "_row_number", "_ingested_at"]
+TECHNICAL_COLUMNS = ["_batch_id", "_source_file", "_source_hash", "_row_number", "_ingested_at", "_id"]
 HASH_COLUMN = "hash"
 TYPE_SUFFIX = "_type"
 
@@ -40,7 +41,10 @@ def type_column(target_name: str) -> str:
 
 
 def contract_table(contract: dict, metadata: MetaData) -> Table:
-    """Table bronze d'un contrat : paires <col> / <col>_type, hash de la ligne, colonnes techniques, clé primaire."""
+    """Table bronze d'un contrat : paires <col> / <col>_type, hash de la ligne, colonnes techniques.
+
+    Le bronze est un historique en ajout seul : chaque exécution insère toutes les lignes de ses fichiers sous
+    son _batch_id (indexé). La clé primaire est un identifiant technique auto-généré, _id."""
     columns = []
     for entry in contract["columns"]:
         name = entry["target_name"]
@@ -53,35 +57,40 @@ def contract_table(contract: dict, metadata: MetaData) -> Table:
         *columns,
         Column(HASH_COLUMN, Text, nullable=False,
                comment="SHA-256 des valeurs des colonnes du fichier pour cette ligne (colonnes ajoutées exclues)"),
-        Column("_batch_id", Uuid, nullable=False, comment="Lot d'ingestion"),
+        Column("_batch_id", Uuid, nullable=False,
+               comment="Exécution d'ingestion (UUID), commun à toutes les tables (voir _ingestion_batch)"),
         Column("_source_file", Text, nullable=False, comment="Fichier source, relatif à la racine du projet"),
         Column("_source_hash", Text, nullable=False, comment="SHA-256 des octets du fichier source"),
         Column("_row_number", BigInteger, nullable=False, comment="Numéro d'enregistrement dans la source (1 = première ligne de données)"),
-        Column("_ingested_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
-        PrimaryKeyConstraint("_source_hash", "_row_number"),
+        Column("_ingested_at", DateTime(timezone=True), nullable=False, server_default=text("now()"),
+               comment="Instant UTC de l'exécution d'ingestion, le même pour toutes les tables"),
+        Column("_id", BigInteger, Identity(always=True), primary_key=True,
+               comment="Identifiant technique de la ligne, auto-généré"),
+        Index(f"ix_{contract['target']['table']}_batch_id", "_batch_id"),
         comment=f"Bronze : {contract['source']['path']}" + (f" (table {contract['source']['table']})"
                                                             if contract["source"].get("table") else ""),
     )
 
 
 def registry_table(metadata: MetaData) -> Table:
-    """Registre des lots : une ligne par chargement, écrite hors de la transaction de chargement."""
+    """Registre des exécutions : une ligne par fichier chargé et par exécution (batch_id), écrite hors de la
+    transaction de chargement. Dit quels fichiers (chemin et SHA-256) chaque ingestion a utilisés."""
     return Table(
         REGISTRY_TABLE,
         metadata,
-        Column("batch_id", Uuid, primary_key=True),
+        Column("batch_id", Uuid, nullable=False, comment="Exécution d'ingestion (UUID)"),
         Column("contract", Text, nullable=False),
         Column("target_table", Text, nullable=False),
         Column("source_file", Text, nullable=False),
         Column("source_hash", Text, nullable=False),
-        Column("status", Text, nullable=False, comment="RUNNING, SUCCESS ou FAILED"),
+        Column("status", Text, nullable=False, comment="RUNNING, SUCCESS, FAILED ou ROLLED_BACK"),
         Column("rows_read", BigInteger),
         Column("rows_inserted", BigInteger),
-        Column("rows_skipped", BigInteger, comment="Lignes déjà présentes (rejeu)"),
         Column("error", Text),
         Column("started_at", DateTime(timezone=True), nullable=False),
         Column("completed_at", DateTime(timezone=True)),
-        comment="Registre des lots d'ingestion bronze",
+        PrimaryKeyConstraint("batch_id", "contract"),
+        comment="Registre des exécutions d'ingestion bronze : fichiers utilisés par chaque batch_id",
     )
 
 

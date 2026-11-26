@@ -4,14 +4,14 @@ import argparse
 import sys
 from pathlib import Path
 
-from indusense import describer, write_card
+from indusense import write_card
 from indusense.card import ARTIFACTS_DIR
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="indusense",
-        description=f"Écrit la carte d'identité Markdown de chaque fichier (CSV ou script SQL) dans "
+        description=f"Écrit la carte d'identité Markdown (et le profil JSON) de chaque fichier (CSV ou script SQL) dans "
         f"{ARTIFACTS_DIR}/<AAAAMMJJ>/<nom_fichier>_<HHMMSS>.md et affiche son chemin.",
     )
     parser.add_argument("files", nargs="+", type=Path, metavar="FICHIER", help="fichier CSV ou script SQL")
@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
             status = 1
             continue
         try:
-            print(write_card(path, describer(path)))
+            print(write_card(path))
         except Exception as error:  # un fichier illisible ne bloque pas les suivants
             print(f"indusense: {path} : {error}", file=sys.stderr)
             status = 1

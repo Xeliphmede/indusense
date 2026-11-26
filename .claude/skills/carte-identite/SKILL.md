@@ -20,6 +20,7 @@ Fichiers demandés : $ARGUMENTS
    ```
 
    - Sortie standard : le chemin de chaque carte écrite, `artifacts/ingestion/identities/<AAAAMMJJ>/<nom>_<HHMMSS>.md`.
+     Le profil JSON du fichier est écrit à côté (même nom, extension `.json`).
    - Sortie d'erreur : une ligne `indusense: <fichier> : <message>` par fichier en échec (introuvable, format non
      pris en charge, fichier illisible). Les autres fichiers sont quand même traités ; le code de sortie vaut alors 1.
 

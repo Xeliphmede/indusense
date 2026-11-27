@@ -106,6 +106,7 @@ def pipeline(argv: list[str]) -> int:
     print_results("bronze", result.bronze)
     if result.silver:
         print_results("silver", result.silver)
+        print(f"rapport des traitements : {result.silver[0].report}")
     print_cast_errors(result.cast_errors)
     return 0 if result.succeeded else 1
 
@@ -131,6 +132,7 @@ def silver(argv: list[str]) -> int:
         print(f"indusense: {error}", file=sys.stderr)
         return 1
     print_results("silver", results)
+    print(f"rapport des traitements : {results[0].report}")
     print_cast_errors([e for r in results for e in r.errors])
     return 0 if all(r.status == "SUCCESS" for r in results) else 1
 

@@ -152,3 +152,52 @@ def cast_column(raw: str | None, entry: dict):
         except ValueError:
             return None, f"not a UUID: {raw!r}"
     return value, None
+
+
+TYPE_TREATMENTS = {
+    "NUMBER": "conversion en nombre : virgule décimale acceptée, NaN et infini refusés",
+    "INTEGER": "conversion en entier : chiffres et signe uniquement (4.5 refusé)",
+    "BINARY": "conversion en booléen : 1/true/t/yes/y -> vrai, 0/false/f/no/n -> faux (casse ignorée), autre refusé",
+    "DATE": "conversion en date ISO YYYY-MM-DD",
+    "TIME": "conversion en heure ISO HH:MM[:SS[.ffffff]]",
+    "TIMESTAMPTZ": "conversion en horodatage ISO ; sans fuseau : étiqueté UTC, jamais converti (ADR-003) ; "
+                   "avec fuseau : fuseau conservé",
+}
+
+
+def column_treatments(entry: dict) -> list[str]:
+    """Traitements que `cast_column` applique à une colonne du contrat, dans l'ordre, en clair (rapport silver).
+    Tenue à jour avec `cast_column` : toute règle ajoutée là doit être décrite ici."""
+    col_type, silver_type = entry["type"], entry["silver_type"].upper()
+    steps = ["valeur absente (NULL) ou vide / composée d'espaces -> NULL"]
+    if col_type in CASTS:
+        steps.append("espaces de début et de fin ignorés")
+        steps.append(TYPE_TREATMENTS[col_type])
+    elif silver_type in INTEGER_RANGES or silver_type == "UUID":
+        steps.append("espaces de début et de fin ignorés")
+    else:
+        steps.append(f"type {col_type} : valeur texte conservée telle quelle, caractère pour caractère")
+    if entry.get("pseudonymize"):
+        steps.append("valeur déjà pseudonymisée en bronze (HMAC-SHA256 salé) : le pseudonyme est recopié")
+    if match := LENGTH_PATTERN.fullmatch(silver_type):
+        steps.append(f"longueur <= {match[1]} caractères vérifiée ({silver_type}) : jamais tronquée")
+    elif silver_type in INTEGER_RANGES:
+        if col_type not in CASTS:
+            steps.append(f"identifiant {col_type} converti en entier : chiffres et signe uniquement")
+        bound = INTEGER_RANGES[silver_type]
+        steps.append(f"bornes {silver_type} vérifiées [{-bound}, {bound - 1}]")
+    elif match := NUMERIC_PATTERN.fullmatch(silver_type):
+        if match[1]:
+            precision, scale = int(match[1]), int(match[2] or 0)
+            steps.append(f"décimal exact {silver_type} : au plus {scale} décimale(s) et {precision - scale} chiffre(s) "
+                         f"avant la virgule, jamais arrondi")
+        else:
+            steps.append("décimal exact NUMERIC, sans limite de précision")
+    elif silver_type in FLOAT_TYPES:
+        steps.append(f"le flottant {silver_type} doit restituer exactement le nombre écrit (sinon : précision "
+                     f"insuffisante, refusé)")
+    elif silver_type == "UUID":
+        steps.append("conversion en UUID")
+    if entry.get("nullable") is False:
+        steps.append("valeur obligatoire (nullable: false) : une absence est une erreur")
+    return steps

@@ -116,3 +116,20 @@ def test_float_that_cannot_hold_the_value_is_an_error(raw, silver_type):
                                                   ("1.5", "REAL")])
 def test_float_that_holds_the_value_is_kept(raw, silver_type):
     assert cast_column(raw, entry("NUMBER", silver_type))[1] is None
+
+
+def test_column_treatments_follow_the_cast_rules():
+    from indusense.silver.casting import column_treatments
+
+    assert column_treatments({"type": "NUMBER", "silver_type": "NUMERIC(6,2)", "nullable": False}) == [
+        "valeur absente (NULL) ou vide / composée d'espaces -> NULL",
+        "espaces de début et de fin ignorés",
+        "conversion en nombre : virgule décimale acceptée, NaN et infini refusés",
+        "décimal exact NUMERIC(6,2) : au plus 2 décimale(s) et 4 chiffre(s) avant la virgule, jamais arrondi",
+        "valeur obligatoire (nullable: false) : une absence est une erreur",
+    ]
+    identifier = column_treatments({"type": "IDENTIFIER", "silver_type": "INTEGER"})
+    assert "identifiant IDENTIFIER converti en entier : chiffres et signe uniquement" in identifier
+    assert not any("telle quelle" in step for step in identifier)
+    assert "type CATEGORY : valeur texte conservée telle quelle, caractère pour caractère" in column_treatments(
+        {"type": "CATEGORY", "silver_type": "TEXT"})

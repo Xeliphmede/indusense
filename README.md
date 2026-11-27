@@ -128,6 +128,18 @@ schéma [pandera](https://pandera.readthedocs.io/) généré à partir du contra
 exactement la valeur bronze (texte caractère pour caractère, nombre comparé à son décimal exact, `NULL` si et
 seulement si vide). Une seule différence et la transaction est annulée, comme pour une erreur de cast.
 
+**Rapport des traitements.** Chaque exécution silver, réussie ou non, écrit un rapport Markdown daté :
+`artifacts/ingestion/silver/<AAAAMMJJ>/silver_<HHMMSS>_<run_id>.md` (chemin affiché par la commande). Il donne le
+début et la fin (UTC), le batch bronze, la taille des lots d'écriture (`batch_size`), le commit du code, la
+version et l'empreinte de chaque contrat, puis, pour chaque colonne, ses volumes (valeurs typées, `NULL`,
+erreurs) et la liste ordonnée des traitements appliqués, et enfin les erreurs.
+
+**Répartition et anomalies.** `silver.ipynb` (section 7) trace, sur le batch typé, l'histogramme et la boîte à
+moustaches de chaque mesure, une boîte par machine, la production rapportée à la capacité déclarée, et une
+synthèse : valeurs aberrantes (bornes de Tukey), valeurs collées aux bornes (capteur saturé), doublons de clé
+naturelle (`src/indusense/silver/anomalies.py`). Rien n'y est corrigé : c'est l'état des lieux avant les règles
+de nettoyage.
+
 Les colonnes dérivées déclarées par les contrats (`date_time`, `comment_normalized`) ne sont pas encore produites.
 
 ### Tests
@@ -174,6 +186,8 @@ src/indusense/
     schema.py              métadonnée SQLAlchemy du schéma silver (tables typées, registre _cast_run)
     loader.py              typage d'un batch bronze en silver, tout ou rien
     fidelity.py            relecture du silver et rapprochement avec le bronze (pandera) : aucune perte
+    report.py              rapport Markdown daté d'une exécution : traitements de chaque colonne, batch_size
+    anomalies.py           indicateurs d'anomalies (Tukey, valeurs aux bornes, doublons de clé)
   pipeline.py              pipeline bronze puis silver, sous un même batch_id
 config/
   bronze/*.json            contrats d'ingestion (un par table cible)
@@ -196,6 +210,7 @@ artifacts/                 cartes générées (non versionnées)
 | `pandas` | lecture et analyse des données |
 | `sqlglot` | analyse du script SQL sans base de données (choix justifié dans le notebook) |
 | `ipykernel` (dev) | exécution du notebook |
+| `matplotlib` (dev) | histogrammes et boîtes à moustaches de `silver.ipynb` |
 | `sqlalchemy`, `psycopg[binary]` | accès PostgreSQL |
 | `alembic` | migrations du schéma bronze |
 | `pydantic-settings` | configuration lue dans `.env` |

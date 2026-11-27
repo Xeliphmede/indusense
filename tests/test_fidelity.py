@@ -51,21 +51,40 @@ def test_lossy_values(raw, value, silver_type):
     assert not restores(raw, value, entry(silver_type))
 
 
-CONTRACT = {"target": {"table": "telemetry"}, "columns": [
+CONTRACT = {"target": {"table": "telemetry", "natural_key": ["machine_id"]}, "columns": [
     {"target_name": "machine_id", "type": "IDENTIFIER", "silver_type": "VARCHAR(4)"},
     {"target_name": "temperature_c", "type": "NUMBER", "silver_type": "DOUBLE PRECISION"},
 ]}
 
 
 def frame(*rows) -> pd.DataFrame:
+    """Lignes (_id, _row_number, _bronze_id, raw machine_id, raw temperature, machine_id, temperature
+    [, _kept_bronze_id, _kept_row]) : les deux dernières pour une ligne écartée comme doublon."""
     columns = ["_id", "_row_number", "_bronze_id", "machine_id" + BRONZE_SUFFIX, "temperature_c" + BRONZE_SUFFIX,
-               "machine_id", "temperature_c"]
-    return pd.DataFrame(list(rows), columns=columns, dtype=object)
+               "machine_id", "temperature_c", "_kept_bronze_id", "_kept_row"]
+    return pd.DataFrame([row + (None,) * (len(columns) - len(row)) for row in rows], columns=columns, dtype=object)
 
 
 def test_faithful_frame_has_no_error():
     assert validate_fidelity(CONTRACT, frame((1, 1, 1, "M-01", "46.348", "M-01", 46.348),
                                              (2, 2, 2, "M-02", "", "M-02", None))) == []
+
+
+def test_duplicate_dropped_with_the_same_key_is_not_a_loss():
+    # ligne 2 écartée : comparée à la ligne gardée (_id 1) sur la clé seulement, sa température peut différer
+    assert validate_fidelity(CONTRACT, frame((1, 1, 1, "M-01", "46.348", "M-01", 46.348),
+                                             (2, 2, None, "M-01", "46.332", "M-01", 46.348, 1, 1))) == []
+
+
+def test_duplicate_errors():
+    errors = validate_fidelity(CONTRACT, frame(
+        (1, 1, 1, "M-01", "46.348", "M-01", 46.348),
+        (2, 2, None, "M-02", "46.3", "M-01", 46.348, 1, 1),   # clé différente de la ligne gardée
+        (3, 3, None, "M-03", "46.3", None, None, 9, None),    # ligne gardée absente du silver
+    ))
+    assert [(e.column, e.bronze_id) for e in errors] == [("_bronze_id", 3), ("machine_id", 2)]
+    assert errors[0].reason == "lost in silver: recorded as duplicate of bronze _id 9, which is not in silver"
+    assert errors[1].reason.startswith("dropped as duplicate of bronze _id 1, but its key machine_id 'M-02'")
 
 
 def test_every_loss_is_reported_with_its_bronze_row():

@@ -19,6 +19,7 @@ from pathlib import Path
 
 from indusense.settings import PROJECT_ROOT
 from indusense.silver.casting import column_treatments
+from indusense.silver.dedup import RULE as DEDUP_RULE
 from indusense.silver.schema import table_name
 
 REPORTS_DIR = Path("artifacts/ingestion/silver")
@@ -47,10 +48,16 @@ def utc(moment: datetime | None) -> str:
 
 def table_treatments(contract: dict, result, batch_size: int) -> list[str]:
     table = table_name(contract)
+    key = contract["target"].get("natural_key") or []
+    dedup = (f"dédoublonnage sur la clé naturelle ({', '.join(f'`{k}`' for k in key)}) : {DEDUP_RULE} ; "
+             f"{result.rows_deduplicated} ligne(s) écartée(s), consignées dans `silver._duplicate` (ADR-004)"
+             if key else "pas de clé naturelle déclarée : aucun dédoublonnage")
     return [
         f"lecture des lignes de `bronze.{table}` du batch `{result.batch_id}`, dans l'ordre de `_id`",
         "typage de toutes les lignes en mémoire, toutes les erreurs collectées, avant la moindre écriture",
-        f"suppression des lignes de `silver.{table}` déjà issues de ce batch (retypage sans doublon)",
+        dedup,
+        f"suppression des lignes de `silver.{table}` et de `silver._duplicate` déjà issues de ce batch "
+        f"(retypage sans doublon)",
         f"insertion par lots de {batch_size:,} lignes".replace(",", " ")
         + ", avec `_batch_id`, `_bronze_id` (= `bronze._id`) et `_cast_at`",
         "relecture de la table telle que stockée et rapprochement avec le bronze (pandera), avant le commit",
@@ -81,11 +88,12 @@ def render(contracts: dict[str, dict], results: list, batch_size: int) -> str:
         lines += ["> **Exécution annulée** : aucune ligne n'a été gardée en silver pour ce batch. Le batch bronze est "
                   "conservé ; corriger le contrat puis `uv run indusense silver cast " f"{first.batch_id}`.", ""]
     lines += ["## Tables", "",
-              "| Table | Contrat | Statut | Lignes lues | Lignes écrites | Valeurs comparées au bronze | Erreurs |",
-              "| --- | --- | --- | ---: | ---: | ---: | ---: |"]
+              "| Table | Contrat | Statut | Lignes lues | Doublons écartés | Lignes écrites | "
+              "Valeurs comparées au bronze | Erreurs |",
+              "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |"]
     for r in results:
-        lines.append(f"| `{r.target_table}` | `{r.contract}` | {r.status} | {r.rows_read} | {r.rows_inserted} | "
-                     f"{r.values_checked} | {len(r.errors)} |")
+        lines.append(f"| `{r.target_table}` | `{r.contract}` | {r.status} | {r.rows_read} | {r.rows_deduplicated} | "
+                     f"{r.rows_inserted} | {r.values_checked} | {len(r.errors)} |")
 
     for result, contract in zip(results, contracts.values()):
         errors_by_column = Counter(e.column for e in result.errors)
@@ -107,6 +115,14 @@ def render(contracts: dict[str, dict], results: list, batch_size: int) -> str:
                       f"{counts.get('values', 0)} valeur(s) typée(s), {counts.get('nulls', 0)} NULL, "
                       f"{errors_by_column.get(name, 0)} erreur(s).", ""]
             lines += [f"{i}. {step}" for i, step in enumerate(steps, 1)]
+        if result.duplicates:
+            shown = result.duplicates[:MAX_REPORTED_ERRORS]
+            more = len(shown) < len(result.duplicates)
+            lines += ["", f"### Doublons écartés ({len(result.duplicates)}" + (f", {len(shown)} premiers" if more else "")
+                      + ")", "", "| Clé naturelle | `_bronze_id` écarté | NULL | `_bronze_id` gardé | NULL |",
+                      "| --- | ---: | ---: | ---: | ---: |"]
+            lines += [f"| `{d['natural_key']}` | {d['bronze_id']} | {d['missing_values']} | {d['kept_bronze_id']} | "
+                      f"{d['kept_missing_values']} |" for d in shown]
         if errors_by_column.get("_bronze_id"):
             lines += ["", f"{errors_by_column['_bronze_id']} ligne(s) bronze sans ligne silver."]
         if result.errors:

@@ -120,11 +120,19 @@ issues de ce batch sont remplacées) :
 uv run indusense silver cast <batch_id>
 ```
 
+**Doublons (ADR-004).** Le silver garde une ligne par clé naturelle du contrat (`natural_key`) et par batch,
+garantie par une contrainte d'unicité. Entre lignes de même clé, il garde la plus complète (le moins de `NULL`),
+puis la première du fichier, recopiée telle quelle (rien n'est fusionné ni moyenné). Chaque ligne écartée est
+consignée dans `silver._duplicate` avec la ligne gardée à sa place. Seule la télémétrie est concernée :
+1 346 lignes en trop sur 135 626, des mesures réémises aussitôt avec quelques centièmes d'écart
+(`docs/adr/004-dedoublonnage-silver.md`).
+
 **Aucune perte par rapport au bronze.** Le cast refuse ce qu'un type ne peut pas restituer (texte trop long pour
 un `VARCHAR`, décimales en trop pour un `NUMERIC`, nombre qu'un `DOUBLE PRECISION` n'écrit pas exactement). Puis,
 avant le commit, chaque table silver est relue telle que PostgreSQL l'a stockée et rapprochée du bronze par un
 schéma [pandera](https://pandera.readthedocs.io/) généré à partir du contrat
-(`src/indusense/silver/fidelity.py`) : chaque ligne bronze a sa ligne silver, chaque valeur silver restitue
+(`src/indusense/silver/fidelity.py`) : chaque ligne bronze a sa ligne silver (ou est consignée comme doublon d'une
+ligne silver de même clé), chaque valeur silver restitue
 exactement la valeur bronze (texte caractère pour caractère, nombre comparé à son décimal exact, `NULL` si et
 seulement si vide). Une seule différence et la transaction est annulée, comme pour une erreur de cast.
 
@@ -185,6 +193,7 @@ src/indusense/
     casting.py             conversion des valeurs texte vers le type du contrat (type, silver_type, nullable)
     schema.py              métadonnée SQLAlchemy du schéma silver (tables typées, registre _cast_run)
     loader.py              typage d'un batch bronze en silver, tout ou rien
+    dedup.py               dédoublonnage sur la clé naturelle (ADR-004)
     fidelity.py            relecture du silver et rapprochement avec le bronze (pandera) : aucune perte
     report.py              rapport Markdown daté d'une exécution : traitements de chaque colonne, batch_size
     anomalies.py           indicateurs d'anomalies (Tukey, valeurs aux bornes, doublons de clé)
@@ -193,6 +202,7 @@ config/
   bronze/*.json            contrats d'ingestion (un par table cible)
   schema/                  JSON Schema du contrat v2
 migrations/                migrations Alembic des schémas bronze et silver
+docs/adr/                  décisions d'architecture (004 : dédoublonnage silver)
 alembic.ini                configuration Alembic (sans identifiants)
   cli.py                   ligne de commande indusense
 tests/                     tests pytest (uv run pytest)

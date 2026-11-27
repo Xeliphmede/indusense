@@ -7,7 +7,9 @@
 - Au moins une erreur de cast : chaque erreur est loguée (logger `indusense.silver`), rien n'est écrit en silver,
   le contrat fautif est FAILED, les autres ROLLED_BACK. Le batch bronze n'est pas touché : on corrige le contrat
   puis on retype ce batch, sans recharger les fichiers.
-- Sinon, une seule transaction pour toutes les tables : les lignes silver déjà issues de ce batch sont remplacées
+- Sinon, dédoublonnage sur la clé naturelle du contrat (dedup.py, ADR-004) : une ligne par clé, la plus complète ;
+  les lignes écartées sont consignées dans `silver._duplicate`.
+- Puis une seule transaction pour toutes les tables : les lignes silver déjà issues de ce batch sont remplacées
   (retyper un batch ne crée pas de doublon), puis insertion par lots de BATCH_SIZE lignes.
 - Avant le commit, chaque table silver est relue telle que stockée et rapprochée du bronze (fidelity.py, pandera) :
   une ligne manquante ou une valeur qui ne restitue pas exactement le bronze (texte tronqué, précision perdue...)
@@ -28,9 +30,10 @@ from sqlalchemy import Engine, delete, insert, select, text, update
 from indusense.bronze.schema import REGISTRY_TABLE as BRONZE_REGISTRY
 from indusense.bronze.schema import SCHEMA as BRONZE_SCHEMA
 from indusense.silver.casting import cast_column
+from indusense.silver.dedup import deduplicate
 from indusense.silver.fidelity import check_fidelity
 from indusense.silver.report import REPORTS_DIR, write_report
-from indusense.silver.schema import REGISTRY_TABLE, SCHEMA, build_metadata, table_name
+from indusense.silver.schema import DUPLICATE_TABLE, REGISTRY_TABLE, SCHEMA, build_metadata, table_name
 
 BATCH_SIZE = 5_000
 MAX_LOGGED_ERRORS = 50  # au-delà, un résumé : toutes les erreurs restent dans le résultat
@@ -68,6 +71,8 @@ class CastResult:
     status: str  # RUNNING, SUCCESS, FAILED (erreurs de cast dans ce contrat), ROLLED_BACK (un autre contrat a échoué)
     rows_read: int = 0
     rows_inserted: int = 0
+    rows_deduplicated: int = 0  # lignes bronze écartées : même clé naturelle qu'une ligne gardée (ADR-004)
+    duplicates: list[dict] = field(default_factory=list)  # lignes écartées, écrites dans silver._duplicate
     values_checked: int = 0  # valeurs silver relues et rapprochées du bronze
     errors: list[CastError] = field(default_factory=list)  # erreurs de cast, puis de fidélité
     column_counts: dict[str, dict] = field(default_factory=dict)  # colonne -> {"values": n, "nulls": n}
@@ -82,7 +87,7 @@ class CastResult:
 
     def as_dict(self) -> dict:
         values = asdict(self)
-        del values["errors"], values["column_counts"]
+        del values["errors"], values["column_counts"], values["duplicates"]
         return values | {"cast_errors": len(self.errors), "duration_s": self.duration_s}
 
 
@@ -142,6 +147,7 @@ def cast_batch(contracts: dict[str, dict], engine: Engine, batch_id: uuid.UUID, 
     batch_id = uuid.UUID(str(batch_id))
     metadata = build_metadata(contracts)
     registry = metadata.tables[f"{SCHEMA}.{REGISTRY_TABLE}"]
+    duplicates = metadata.tables[f"{SCHEMA}.{DUPLICATE_TABLE}"]
     with engine.connect() as conn:
         check_batch(conn, metadata, contracts, batch_id)
 
@@ -165,9 +171,16 @@ def cast_batch(contracts: dict[str, dict], engine: Engine, batch_id: uuid.UUID, 
                                     .where(source.c._batch_id == batch_id).order_by(source.c._id)).mappings()
                 records[result.contract], result.errors = cast_records(contract, rows)
                 result.rows_read = len(records[result.contract])
-                for entry in contract["columns"]:
-                    nulls = sum(1 for record in records[result.contract] if record[entry["target_name"]] is None)
-                    result.column_counts[entry["target_name"]] = {"values": result.rows_read - nulls, "nulls": nulls}
+
+        if not any(r.errors for r in results):  # 1b. dédoublonnage sur la clé naturelle
+            for result, contract in zip(results, contracts.values()):
+                records[result.contract], result.duplicates = deduplicate(contract, records[result.contract])
+                result.rows_deduplicated = len(result.duplicates)
+        for result, contract in zip(results, contracts.values()):
+            for entry in contract["columns"]:
+                nulls = sum(1 for record in records[result.contract] if record[entry["target_name"]] is None)
+                result.column_counts[entry["target_name"]] = {"values": len(records[result.contract]) - nulls,
+                                                              "nulls": nulls}
 
         if any(r.errors for r in results):  # 2a. au moins une erreur : rien n'est écrit
             cancel(results, "cast")
@@ -179,6 +192,11 @@ def cast_batch(contracts: dict[str, dict], engine: Engine, batch_id: uuid.UUID, 
                 current = result
                 target = metadata.tables[result.target_table]
                 conn.execute(delete(target).where(target.c._batch_id == batch_id))
+                conn.execute(delete(duplicates).where(duplicates.c.batch_id == batch_id,
+                                                      duplicates.c.target_table == result.target_table))
+                if result.duplicates:
+                    conn.execute(insert(duplicates), [d | {"target_table": result.target_table, "batch_id": batch_id,
+                                                           "run_id": run_id} for d in result.duplicates])
                 rows = records[result.contract]
                 for start in range(0, len(rows), batch_size):
                     chunk = [row | {"_cast_at": cast_at} for row in rows[start:start + batch_size]]
@@ -195,8 +213,8 @@ def cast_batch(contracts: dict[str, dict], engine: Engine, batch_id: uuid.UUID, 
                 conn.execute(text(f"ANALYZE {result.target_table}"))
         for result in results:
             result.status = "SUCCESS"
-            logger.info("silver : %s, %d ligne(s) typée(s), %d valeur(s) identiques au bronze", result.target_table,
-                        result.rows_inserted, result.values_checked)
+            logger.info("silver : %s, %d ligne(s) typée(s), %d doublon(s) écarté(s), %d valeur(s) identiques au bronze",
+                        result.target_table, result.rows_inserted, result.rows_deduplicated, result.values_checked)
         return results
     except FidelityFailed:
         cancel(results, "fidelity")
@@ -219,6 +237,7 @@ def cast_batch(contracts: dict[str, dict], engine: Engine, batch_id: uuid.UUID, 
                 conn.execute(update(registry).where(registry.c.run_id == run_id,
                                                     registry.c.contract == result.contract).values(
                     status=result.status, rows_read=result.rows_read, rows_inserted=result.rows_inserted,
+                    rows_deduplicated=result.rows_deduplicated if result.status == "SUCCESS" else 0,
                     cast_errors=len(result.errors), error=result.error, completed_at=result.completed_at))
         if report_dir is not None:
             path = write_report(contracts, results, batch_size, report_dir)

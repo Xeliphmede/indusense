@@ -141,3 +141,33 @@ def test_cast_records_collects_every_error():
         ("voltage_mean_v", "missing value (column is not nullable)"),
     ]
     assert records[0]["rotation_mean_rpm"] == 1500.0 and records[0]["pressure_bar"] is None
+
+
+def test_every_silver_value_is_checked_against_bronze(pipeline):
+    checked = {r.target_table: r.values_checked for r in pipeline.silver}
+    assert checked["silver.telemetry"] == EXPECTED_ROWS["telemetry"] * 7
+
+
+def test_value_lost_after_cast_cancels_silver(engine, pipeline, monkeypatch):
+    """Filet de sécurité : si le cast laissait passer une valeur altérée, la relecture la détecte avant commit."""
+    import indusense.silver.loader as loader
+
+    real = loader.cast_column
+
+    def truncating(raw, entry):
+        value, error = real(raw, entry)
+        return (value[:4] if entry["target_name"] == "model" else value), error
+
+    monkeypatch.setattr(loader, "cast_column", truncating)
+    before = scalar(engine, "SELECT count(*) FROM silver.machine WHERE _batch_id = :b", b=pipeline.batch_id)
+    results = cast_batch(load_contracts(), engine, pipeline.batch_id)
+
+    statuses = {r.contract: r.status for r in results}
+    assert statuses.pop("machine.json") == "FAILED" and set(statuses.values()) == {"ROLLED_BACK"}
+    machine = next(r for r in results if r.contract == "machine.json")
+    assert len(machine.errors) == 15 and machine.errors[0].column == "model"
+    assert "does not restore" in machine.errors[0].reason
+    # la transaction est annulée : les lignes silver précédentes de ce batch sont intactes
+    assert scalar(engine, "SELECT count(*) FROM silver.machine WHERE _batch_id = :b", b=pipeline.batch_id) == before
+    assert scalar(engine, "SELECT count(*) FROM silver.machine WHERE _batch_id = :b AND length(model) = 4",
+                  b=pipeline.batch_id) == 0

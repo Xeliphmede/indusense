@@ -120,6 +120,14 @@ issues de ce batch sont remplacées) :
 uv run indusense silver cast <batch_id>
 ```
 
+**Aucune perte par rapport au bronze.** Le cast refuse ce qu'un type ne peut pas restituer (texte trop long pour
+un `VARCHAR`, décimales en trop pour un `NUMERIC`, nombre qu'un `DOUBLE PRECISION` n'écrit pas exactement). Puis,
+avant le commit, chaque table silver est relue telle que PostgreSQL l'a stockée et rapprochée du bronze par un
+schéma [pandera](https://pandera.readthedocs.io/) généré à partir du contrat
+(`src/indusense/silver/fidelity.py`) : chaque ligne bronze a sa ligne silver, chaque valeur silver restitue
+exactement la valeur bronze (texte caractère pour caractère, nombre comparé à son décimal exact, `NULL` si et
+seulement si vide). Une seule différence et la transaction est annulée, comme pour une erreur de cast.
+
 Les colonnes dérivées déclarées par les contrats (`date_time`, `comment_normalized`) ne sont pas encore produites.
 
 ### Tests
@@ -165,6 +173,7 @@ src/indusense/
     casting.py             conversion des valeurs texte vers le type du contrat (type, silver_type, nullable)
     schema.py              métadonnée SQLAlchemy du schéma silver (tables typées, registre _cast_run)
     loader.py              typage d'un batch bronze en silver, tout ou rien
+    fidelity.py            relecture du silver et rapprochement avec le bronze (pandera) : aucune perte
   pipeline.py              pipeline bronze puis silver, sous un même batch_id
 config/
   bronze/*.json            contrats d'ingestion (un par table cible)
@@ -191,6 +200,7 @@ artifacts/                 cartes générées (non versionnées)
 | `alembic` | migrations du schéma bronze |
 | `pydantic-settings` | configuration lue dans `.env` |
 | `jsonschema` | validation des contrats |
+| `pandera` | validation du silver relu : aucune ligne ni valeur perdue par rapport au bronze |
 | `pytest` (dev) | tests |
 
 ## Contribution

@@ -101,3 +101,18 @@ def test_missing_value_is_an_error_only_when_not_nullable(raw):
     assert cast_column(raw, entry("NUMBER", "DOUBLE PRECISION")) == (None, None)
     assert cast_column(raw, entry("NUMBER", "DOUBLE PRECISION", nullable=False)) == (
         None, "missing value (column is not nullable)")
+
+
+@pytest.mark.parametrize(("raw", "silver_type"), [
+    ("0.12345678901234567891", "DOUBLE PRECISION"),
+    ("12345678901234567890", "DOUBLE PRECISION"),
+    ("123456.789", "REAL"),
+])
+def test_float_that_cannot_hold_the_value_is_an_error(raw, silver_type):
+    assert cast_column(raw, entry("NUMBER", silver_type)) == (None, f"loses precision in {silver_type}: {raw!r}")
+
+
+@pytest.mark.parametrize(("raw", "silver_type"), [("1665.172", "DOUBLE PRECISION"), ("1,50", "DOUBLE PRECISION"), ("46.348", "REAL"),
+                                                  ("1.5", "REAL")])
+def test_float_that_holds_the_value_is_kept(raw, silver_type):
+    assert cast_column(raw, entry("NUMBER", silver_type))[1] is None

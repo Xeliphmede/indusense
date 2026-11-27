@@ -49,3 +49,55 @@ def test_timestamp_with_offset_is_kept():
     value, _ = cast_value("2025-06-15 10:00:00+02", "TIMESTAMPTZ")
     assert value.utcoffset() == timedelta(hours=2)
     assert value == datetime(2025, 6, 15, 10, tzinfo=timezone(timedelta(hours=2)))
+
+
+# cast_column : type du contrat, puis contraintes du silver_type et de nullable
+
+from decimal import Decimal  # noqa: E402
+import uuid  # noqa: E402
+
+from indusense.silver.casting import cast_column  # noqa: E402
+
+
+def entry(col_type: str, silver_type: str, nullable: bool | None = None) -> dict:
+    return {"target_name": "c", "type": col_type, "silver_type": silver_type} | (
+        {} if nullable is None else {"nullable": nullable})
+
+
+@pytest.mark.parametrize(("raw", "column", "expected"), [
+    ("MACH-01", entry("IDENTIFIER", "VARCHAR(16)"), "MACH-01"),
+    ("42", entry("IDENTIFIER", "INTEGER"), 42),
+    ("2.76", entry("NUMBER", "NUMERIC(6,2)"), Decimal("2.76")),
+    ("1,5", entry("NUMBER", "NUMERIC(6,2)"), Decimal("1.5")),
+    ("8.0", entry("NUMBER", "NUMERIC(6,2)"), Decimal("8.0")),
+    ("123.456", entry("NUMBER", "NUMERIC"), Decimal("123.456")),
+    ("46.348", entry("NUMBER", "DOUBLE PRECISION"), 46.348),
+    ("1", entry("BINARY", "BOOLEAN"), True),
+    ("114", entry("INTEGER", "INTEGER"), 114),
+    ("6f1c5b8e-6a51-4c1a-9a8f-2d3f1e0a7b11", entry("IDENTIFIER", "UUID"),
+     uuid.UUID("6f1c5b8e-6a51-4c1a-9a8f-2d3f1e0a7b11")),
+])
+def test_cast_column_valid(raw, column, expected):
+    assert cast_column(raw, column) == (expected, None)
+
+
+@pytest.mark.parametrize(("raw", "column", "reason"), [
+    ("MACHINE-0000000001", entry("IDENTIFIER", "VARCHAR(16)"), "longer than VARCHAR(16): 'MACHINE-0000000001'"),
+    ("HIGHEST", entry("CATEGORY", "CHAR(4)"), "longer than CHAR(4): 'HIGHEST'"),
+    ("MACH-01", entry("IDENTIFIER", "INTEGER"), "not an integer: 'MACH-01'"),
+    ("2.765", entry("NUMBER", "NUMERIC(6,2)"), "not a NUMERIC(6,2): '2.765'"),
+    ("10000", entry("NUMBER", "NUMERIC(6,2)"), "not a NUMERIC(6,2): '10000'"),
+    ("40000", entry("INTEGER", "SMALLINT"), "out of SMALLINT range: '40000'"),
+    ("n/a", entry("NUMBER", "NUMERIC(6,2)"), "not a number: 'n/a'"),
+    ("abc", entry("IDENTIFIER", "UUID"), "not a UUID: 'abc'"),
+])
+def test_cast_column_rejects_what_postgresql_would_refuse_or_round(raw, column, reason):
+    assert cast_column(raw, column) == (None, reason)
+
+
+@pytest.mark.parametrize("raw", [None, ""])
+def test_missing_value_is_an_error_only_when_not_nullable(raw):
+    assert cast_column(raw, entry("NUMBER", "DOUBLE PRECISION", nullable=True)) == (None, None)
+    assert cast_column(raw, entry("NUMBER", "DOUBLE PRECISION")) == (None, None)
+    assert cast_column(raw, entry("NUMBER", "DOUBLE PRECISION", nullable=False)) == (
+        None, "missing value (column is not nullable)")

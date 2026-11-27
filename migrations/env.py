@@ -1,10 +1,12 @@
-"""Environnement Alembic : compare la métadonnée construite à partir des contrats bronze à la base."""
+"""Environnement Alembic : compare la métadonnée construite à partir des contrats (schémas bronze et silver) à la base."""
 
 from alembic import context
 from sqlalchemy import create_engine
 
 from indusense.bronze.contract import load_contracts
-from indusense.bronze.schema import SCHEMA, build_metadata
+from indusense.bronze.schema import SCHEMA as BRONZE
+from indusense.silver.schema import SCHEMA as SILVER
+from indusense.silver.schema import build_metadata
 from indusense.settings import get_settings
 
 config = context.config
@@ -12,9 +14,9 @@ target_metadata = build_metadata(load_contracts())
 
 
 def include_name(name, type_, parent_names) -> bool:
-    """Alembic ne gère que le schéma bronze : le reste de la base ne le regarde pas."""
+    """Alembic ne gère que les schémas bronze et silver : le reste de la base ne le regarde pas."""
     if type_ == "schema":
-        return name == SCHEMA
+        return name in (BRONZE, SILVER)
     return True
 
 

@@ -3,11 +3,16 @@
 - `indusense FICHIER [FICHIER ...]` : écrit la carte d'identité (et le profil JSON) de chaque fichier ;
 - `indusense bronze validate [CONTRAT ...]` : valide les contrats bronze (par défaut `config/bronze/*.json`)
   contre leur schéma et les fichiers réels, sans rien lire ni écrire d'autre ; code de sortie 1 s'il y a
-  un problème.
+  un problème ;
+- `indusense pipeline` : ingestion bronze des fichiers puis typage silver de ce batch ; code de sortie 1 si une
+  étape échoue (les erreurs de cast sont listées) ;
+- `indusense silver cast BATCH_ID` : (re)type en silver un batch bronze existant, par exemple après correction
+  d'un contrat.
 """
 
 import argparse
 import sys
+import uuid
 from pathlib import Path
 
 
@@ -18,7 +23,7 @@ def cards(argv: list[str]) -> int:
         prog="indusense",
         description=f"Écrit la carte d'identité Markdown (et le profil JSON) de chaque fichier (CSV ou script SQL) dans "
         f"{ARTIFACTS_DIR}/<AAAAMMJJ>/<nom_fichier>_<HHMMSS>.md et affiche son chemin. "
-        f"Voir aussi : indusense bronze validate.",
+        f"Voir aussi : indusense bronze validate, indusense pipeline, indusense silver cast.",
     )
     parser.add_argument("files", nargs="+", type=Path, metavar="FICHIER", help="fichier CSV ou script SQL")
     args = parser.parse_args(argv)
@@ -72,10 +77,72 @@ def bronze(argv: list[str]) -> int:
     return 0
 
 
+def print_results(title: str, results) -> None:
+    print(title)
+    for r in results:
+        print(f"  {r.target_table:28} {r.status:12} {r.rows_inserted:>8} ligne(s)" + (f"  {r.error}" if r.error else ""))
+
+
+def print_cast_errors(errors) -> None:
+    for error in errors:
+        print(f"indusense: {error}", file=sys.stderr)
+    if errors:
+        print(f"{len(errors)} erreur(s) de cast : rien n'a été écrit en silver", file=sys.stderr)
+
+
+def pipeline(argv: list[str]) -> int:
+    argparse.ArgumentParser(prog="indusense pipeline",
+                            description="Ingestion bronze des fichiers (contrats config/bronze/*.json), puis typage "
+                                        "silver de ce batch. Le schéma doit être à jour (alembic upgrade head).",
+                            ).parse_args(argv)
+    from indusense.pipeline import SchemaOutOfDate, run_pipeline
+
+    try:
+        result = run_pipeline()
+    except SchemaOutOfDate as error:
+        print(f"indusense: {error}", file=sys.stderr)
+        return 1
+    print(f"batch_id : {result.batch_id}")
+    print_results("bronze", result.bronze)
+    if result.silver:
+        print_results("silver", result.silver)
+    print_cast_errors(result.cast_errors)
+    return 0 if result.succeeded else 1
+
+
+def silver(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="indusense silver", description="Couche silver.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    cast = commands.add_parser("cast", help="type en silver un batch bronze existant",
+                               description="Type le batch bronze BATCH_ID dans les tables silver (remplace les lignes "
+                                           "silver déjà issues de ce batch). Code de sortie 1 en cas d'erreur.")
+    cast.add_argument("batch_id", type=uuid.UUID, metavar="BATCH_ID", help="batch_id de l'ingestion bronze")
+    args = parser.parse_args(argv)
+
+    from sqlalchemy import create_engine
+
+    from indusense.bronze.contract import load_contracts
+    from indusense.settings import get_settings
+    from indusense.silver.loader import BatchNotReady, cast_batch
+
+    try:
+        results = cast_batch(load_contracts(), create_engine(get_settings().url()), args.batch_id)
+    except BatchNotReady as error:
+        print(f"indusense: {error}", file=sys.stderr)
+        return 1
+    print_results("silver", results)
+    print_cast_errors([e for r in results for e in r.errors])
+    return 0 if all(r.status == "SUCCESS" for r in results) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["bronze"]:
         return bronze(argv[1:])
+    if argv[:1] == ["pipeline"]:
+        return pipeline(argv[1:])
+    if argv[:1] == ["silver"]:
+        return silver(argv[1:])
     return cards(argv)
 
 

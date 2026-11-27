@@ -8,6 +8,9 @@ dimensions, types de colonnes inférés et statistiques des colonnes numériques
 **Ingestion bronze** : charger les fichiers tels quels dans le schéma `bronze` de PostgreSQL, à partir d'un
 contrat JSON généré depuis le profil de la carte d'identité (voir `bronze.ipynb`).
 
+**Couche silver** : typer chaque colonne du bronze selon le contrat dans le schéma `silver`, chaque ligne reliée à
+son batch et à sa ligne bronze (voir `silver.ipynb`).
+
 ## Prérequis
 
 - [uv](https://docs.astral.sh/uv/)
@@ -89,10 +92,40 @@ La validation des contrats existe aussi en ligne de commande (code de sortie 1 s
 uv run indusense bronze validate
 ```
 
+### Pipeline et couche silver
+
+Le pipeline enchaîne l'ingestion bronze et le typage silver de ce même batch :
+
+```shell
+uv run alembic upgrade head      # schémas bronze et silver à jour (le pipeline ne migre jamais lui-même)
+uv run indusense pipeline        # bronze puis silver ; code de sortie 1 si une étape échoue
+```
+
+`silver.ipynb` fait de même, puis contrôle le résultat (volumes, valeurs absentes, traçabilité, types).
+
+Le schéma `silver` contient une table par contrat. Chaque colonne y est convertie vers le type du contrat
+(`type`, puis `silver_type` : longueur `VARCHAR`, précision `NUMERIC`, `NOT NULL` si `nullable: false`) ; un vide
+du bronze devient `NULL`, un horodatage sans fuseau est étiqueté UTC (ADR-003). Chaque ligne garde `_batch_id`
+(l'exécution d'ingestion bronze) et `_bronze_id`, clé primaire et clé étrangère vers `bronze.<table>._id` :
+une jointure retrouve le fichier, le numéro de ligne et la valeur d'origine. Le registre `silver._cast_run`
+consigne chaque exécution silver.
+
+Toutes les lignes sont typées avant la moindre écriture. **Une seule erreur de cast** (valeur non convertible ou
+absente dans une colonne non nullable) : chaque erreur est loguée (logger `indusense.silver`, affichée par le
+notebook et la ligne de commande), rien n'est écrit en silver, le registre dit `FAILED` / `ROLLED_BACK`. Le batch
+bronze est conservé : corriger le contrat, puis le retyper sans recharger les fichiers (les lignes silver déjà
+issues de ce batch sont remplacées) :
+
+```shell
+uv run indusense silver cast <batch_id>
+```
+
+Les colonnes dérivées déclarées par les contrats (`date_time`, `comment_normalized`) ne sont pas encore produites.
+
 ### Tests
 
 ```shell
-uv run pytest            # les tests d'intégration créent puis suppriment une base indusense_test
+uv run pytest            # les tests d'intégration créent puis suppriment indusense_test et indusense_test_silver
 uv run pytest -m "not integration"
 ```
 
@@ -129,16 +162,20 @@ src/indusense/
     fingerprint.py         empreinte SHA-256 d'une ligne (colonne hash)
     reports.py             rapport d'ingestion et dictionnaire de données
   silver/
-    casting.py             conversion au mieux des valeurs texte vers leur type (couche silver)
+    casting.py             conversion des valeurs texte vers le type du contrat (type, silver_type, nullable)
+    schema.py              métadonnée SQLAlchemy du schéma silver (tables typées, registre _cast_run)
+    loader.py              typage d'un batch bronze en silver, tout ou rien
+  pipeline.py              pipeline bronze puis silver, sous un même batch_id
 config/
   bronze/*.json            contrats d'ingestion (un par table cible)
   schema/                  JSON Schema du contrat v2
-migrations/                migrations Alembic du schéma bronze
+migrations/                migrations Alembic des schémas bronze et silver
 alembic.ini                configuration Alembic (sans identifiants)
   cli.py                   ligne de commande indusense
 tests/                     tests pytest (uv run pytest)
 indusense.ipynb            explications et génération des cartes
 bronze.ipynb               ingestion bronze de bout en bout
+silver.ipynb               pipeline bronze puis silver, contrôles du typage
 .claude/skills/            skill Claude Code carte-identite
 artifacts/                 cartes générées (non versionnées)
 ```

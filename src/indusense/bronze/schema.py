@@ -16,6 +16,7 @@ from sqlalchemy import (BigInteger, Column, DateTime, Identity, Index, MetaData,
                         Uuid, text)
 from sqlalchemy.engine import URL
 
+from indusense.bronze.contract import UNIT_LABELS
 from indusense.settings import PROJECT_ROOT, get_settings
 
 SCHEMA = "bronze"
@@ -33,7 +34,8 @@ def column_comment(entry: dict) -> str:
         comment = f"Pseudonyme HMAC-SHA256 salé de '{entry['source_name']}'"
     else:
         comment = f"Valeur d'origine de '{entry['source_name']}'"
-    return f"{comment} : {entry['description']}" if entry.get("description") else comment
+    comment = f"{comment} : {entry['description']}" if entry.get("description") else comment
+    return f"{comment} (unité : {UNIT_LABELS[entry['unit']]})" if entry.get("unit") else comment
 
 
 def type_column(target_name: str) -> str:

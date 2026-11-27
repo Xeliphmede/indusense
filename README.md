@@ -136,6 +136,13 @@ ligne silver de même clé), chaque valeur silver restitue
 exactement la valeur bronze (texte caractère pour caractère, nombre comparé à son décimal exact, `NULL` si et
 seulement si vide). Une seule différence et la transaction est annulée, comme pour une erreur de cast.
 
+**Dictionnaire de données.** [`docs/silver_dictionary.md`](docs/silver_dictionary.md) décrit chaque table et
+chaque colonne du silver : signification, type, unité, caractère obligatoire, donnée personnelle, statistiques
+(part de `NULL`, min / max, valeurs possibles). Il est généré à partir des contrats et du dernier batch typé
+(`uv run indusense silver dictionary`, ou `silver.ipynb`) : pour changer une description ou une unité, corriger les
+décisions de `bronze.ipynb` (section 2), qui régénèrent les contrats. Les commentaires des colonnes PostgreSQL
+(visibles dans pgAdmin) reprennent la même description et l'unité.
+
 **Rapport des traitements.** Chaque exécution silver, réussie ou non, écrit un rapport Markdown daté :
 `artifacts/ingestion/silver/<AAAAMMJJ>/silver_<HHMMSS>_<run_id>.md` (chemin affiché par la commande). Il donne le
 début et la fin (UTC), le batch bronze, la taille des lots d'écriture (`batch_size`), le commit du code, la
@@ -195,6 +202,7 @@ src/indusense/
     loader.py              typage d'un batch bronze en silver, tout ou rien
     dedup.py               dédoublonnage sur la clé naturelle (ADR-004)
     fidelity.py            relecture du silver et rapprochement avec le bronze (pandera) : aucune perte
+    dictionary.py          dictionnaire de données silver (docs/silver_dictionary.md)
     report.py              rapport Markdown daté d'une exécution : traitements de chaque colonne, batch_size
     anomalies.py           indicateurs d'anomalies (Tukey, valeurs aux bornes, doublons de clé)
   pipeline.py              pipeline bronze puis silver, sous un même batch_id

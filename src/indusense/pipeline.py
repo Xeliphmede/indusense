@@ -8,6 +8,7 @@
 
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from alembic import command
 from alembic.util import CommandError
@@ -18,6 +19,7 @@ from indusense.bronze.loader import LoadResult, load_contracts_into
 from indusense.bronze.schema import alembic_config
 from indusense.settings import get_settings
 from indusense.silver.loader import CastResult, cast_batch
+from indusense.silver.report import REPORTS_DIR
 
 
 class SchemaOutOfDate(Exception):
@@ -48,13 +50,13 @@ def check_schema(engine: Engine) -> None:
 
 
 def run_pipeline(engine: Engine | None = None, contracts: dict[str, dict] | None = None,
-                 salt: str | None = None) -> PipelineResult:
-    """Charge les fichiers en bronze, puis type ce batch en silver."""
+                 salt: str | None = None, report_dir: Path | None = REPORTS_DIR) -> PipelineResult:
+    """Charge les fichiers en bronze, puis type ce batch en silver (rapport des traitements dans report_dir)."""
     engine = engine or create_engine(get_settings().url())
     contracts = contracts if contracts is not None else load_contracts()
     check_schema(engine)
     bronze = load_contracts_into(contracts, engine, salt=salt)
     result = PipelineResult(batch_id=bronze[0].batch_id, bronze=bronze)
     if all(r.status == "SUCCESS" for r in bronze):
-        result.silver = cast_batch(contracts, engine, result.batch_id)
+        result.silver = cast_batch(contracts, engine, result.batch_id, report_dir=report_dir)
     return result

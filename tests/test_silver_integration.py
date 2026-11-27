@@ -45,8 +45,13 @@ def engine():
 
 
 @pytest.fixture(scope="module")
-def pipeline(engine):
-    return run_pipeline(engine)
+def reports(tmp_path_factory):
+    return tmp_path_factory.mktemp("silver_reports")
+
+
+@pytest.fixture(scope="module")
+def pipeline(engine, reports):
+    return run_pipeline(engine, report_dir=reports)
 
 
 def scalar(engine, sql: str, **params):
@@ -90,7 +95,7 @@ def test_empty_bronze_values_become_null(engine, pipeline):
 
 
 def test_recasting_a_batch_replaces_its_rows(engine, pipeline):
-    results = cast_batch(load_contracts(), engine, pipeline.batch_id)
+    results = cast_batch(load_contracts(), engine, pipeline.batch_id, report_dir=None)
     assert {r.status for r in results} == {"SUCCESS"}
     assert scalar(engine, "SELECT count(*) FROM silver.machine WHERE _batch_id = :b", b=pipeline.batch_id) == 15
     assert scalar(engine, "SELECT count(DISTINCT run_id) FROM silver._cast_run WHERE batch_id = :b",
@@ -103,7 +108,7 @@ def test_cast_error_cancels_silver_but_keeps_bronze(engine, pipeline):
         if column["target_name"] == "model":
             column["silver_type"] = "VARCHAR(4)"  # 'InduPress-X1' ne tient plus
     before = scalar(engine, "SELECT count(*) FROM silver.machine")
-    result = run_pipeline(engine, contracts)
+    result = run_pipeline(engine, contracts, report_dir=None)
 
     assert not result.succeeded
     assert {r.status for r in result.bronze} == {"SUCCESS"}
@@ -120,13 +125,13 @@ def test_cast_error_cancels_silver_but_keeps_bronze(engine, pipeline):
                   b=result.batch_id) == 15
 
     # contrat corrigé : on retype le batch bronze conservé, sans recharger les fichiers
-    assert {r.status for r in cast_batch(load_contracts(), engine, result.batch_id)} == {"SUCCESS"}
+    assert {r.status for r in cast_batch(load_contracts(), engine, result.batch_id, report_dir=None)} == {"SUCCESS"}
     assert scalar(engine, "SELECT count(*) FROM silver.machine WHERE _batch_id = :b", b=result.batch_id) == 15
 
 
 def test_unknown_batch_is_refused(engine, pipeline):
     with pytest.raises(BatchNotReady, match="absent"):
-        cast_batch(load_contracts(), engine, uuid.uuid4())
+        cast_batch(load_contracts(), engine, uuid.uuid4(), report_dir=None)
 
 
 def test_cast_records_collects_every_error():
@@ -160,7 +165,7 @@ def test_value_lost_after_cast_cancels_silver(engine, pipeline, monkeypatch):
 
     monkeypatch.setattr(loader, "cast_column", truncating)
     before = scalar(engine, "SELECT count(*) FROM silver.machine WHERE _batch_id = :b", b=pipeline.batch_id)
-    results = cast_batch(load_contracts(), engine, pipeline.batch_id)
+    results = cast_batch(load_contracts(), engine, pipeline.batch_id, report_dir=None)
 
     statuses = {r.contract: r.status for r in results}
     assert statuses.pop("machine.json") == "FAILED" and set(statuses.values()) == {"ROLLED_BACK"}
@@ -171,3 +176,26 @@ def test_value_lost_after_cast_cancels_silver(engine, pipeline, monkeypatch):
     assert scalar(engine, "SELECT count(*) FROM silver.machine WHERE _batch_id = :b", b=pipeline.batch_id) == before
     assert scalar(engine, "SELECT count(*) FROM silver.machine WHERE _batch_id = :b AND length(model) = 4",
                   b=pipeline.batch_id) == 0
+
+
+def test_report_lists_every_column_treatment_with_batch_size(pipeline, reports):
+    [path] = {r.report for r in pipeline.silver}
+    assert path.parent.parent == reports and path.suffix == ".md"
+    report = path.read_text(encoding="utf-8")
+    assert f"`{pipeline.batch_id}`" in report and "| Taille des lots d'écriture (`batch_size`) | 5000 lignes |" in report
+    assert "**SUCCESS**" in report
+    for contract in load_contracts().values():
+        for entry in contract["columns"]:
+            assert f"### `{entry['target_name']}` : {entry['type']} -> {entry['silver_type']}" in report
+    assert "894 NULL" in report  # temperature_c : vides du bronze
+    assert "décimal exact NUMERIC(6,2) : au plus 2 décimale(s)" in report
+    assert "`date_time` : MERGE de date, time" in report
+
+
+def test_failed_run_also_writes_its_report(engine, pipeline, tmp_path):
+    contracts = copy.deepcopy(load_contracts())
+    next(c for c in contracts["machine.json"]["columns"] if c["target_name"] == "model")["silver_type"] = "VARCHAR(4)"
+    results = cast_batch(contracts, engine, pipeline.batch_id, batch_size=100, report_dir=tmp_path)
+    report = results[0].report.read_text(encoding="utf-8")
+    assert "**FAILED**" in report and "Exécution annulée" in report and "100 lignes" in report
+    assert "longer than VARCHAR(4): 'InduPress-X" in report

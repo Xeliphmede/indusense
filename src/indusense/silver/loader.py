@@ -12,6 +12,8 @@
 - Avant le commit, chaque table silver est relue telle que stockée et rapprochée du bronze (fidelity.py, pandera) :
   une ligne manquante ou une valeur qui ne restitue pas exactement le bronze (texte tronqué, précision perdue...)
   est une erreur, loguée comme une erreur de cast, et la transaction est annulée.
+- Chaque exécution, réussie ou non, écrit un rapport Markdown daté (report.py) : batch_size, traitements de
+  chaque colonne, volumes, erreurs.
 - Chaque ligne silver garde `_batch_id` et `_bronze_id` (= `bronze.<table>._id`) : son origine exacte.
 """
 
@@ -19,6 +21,7 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy import Engine, delete, insert, select, text, update
 
@@ -26,6 +29,7 @@ from indusense.bronze.schema import REGISTRY_TABLE as BRONZE_REGISTRY
 from indusense.bronze.schema import SCHEMA as BRONZE_SCHEMA
 from indusense.silver.casting import cast_column
 from indusense.silver.fidelity import check_fidelity
+from indusense.silver.report import REPORTS_DIR, write_report
 from indusense.silver.schema import REGISTRY_TABLE, SCHEMA, build_metadata, table_name
 
 BATCH_SIZE = 5_000
@@ -66,6 +70,8 @@ class CastResult:
     rows_inserted: int = 0
     values_checked: int = 0  # valeurs silver relues et rapprochées du bronze
     errors: list[CastError] = field(default_factory=list)  # erreurs de cast, puis de fidélité
+    column_counts: dict[str, dict] = field(default_factory=dict)  # colonne -> {"values": n, "nulls": n}
+    report: Path | None = None  # rapport Markdown de l'exécution
     error: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -76,7 +82,7 @@ class CastResult:
 
     def as_dict(self) -> dict:
         values = asdict(self)
-        del values["errors"]
+        del values["errors"], values["column_counts"]
         return values | {"cast_errors": len(self.errors), "duration_s": self.duration_s}
 
 
@@ -127,11 +133,12 @@ def check_batch(conn, metadata, contracts: dict[str, dict], batch_id: uuid.UUID)
         raise BatchNotReady(f"bronze batch {batch_id} is not loaded for every contract ({', '.join(problems)})")
 
 
-def cast_batch(contracts: dict[str, dict], engine: Engine, batch_id: uuid.UUID,
-               batch_size: int = BATCH_SIZE) -> list[CastResult]:
+def cast_batch(contracts: dict[str, dict], engine: Engine, batch_id: uuid.UUID, batch_size: int = BATCH_SIZE,
+               report_dir: Path | None = REPORTS_DIR) -> list[CastResult]:
     """Type le batch bronze `batch_id` dans les tables silver. Retourne un résultat par contrat, dans l'ordre des
     contrats, également consigné dans `silver._cast_run`. Une erreur de cast ne lève pas d'exception : rien n'est
-    écrit, les erreurs sont loguées et portées par les résultats (FAILED / ROLLED_BACK)."""
+    écrit, les erreurs sont loguées et portées par les résultats (FAILED / ROLLED_BACK). Le rapport Markdown est
+    écrit dans `report_dir` (aucun si None)."""
     batch_id = uuid.UUID(str(batch_id))
     metadata = build_metadata(contracts)
     registry = metadata.tables[f"{SCHEMA}.{REGISTRY_TABLE}"]
@@ -158,6 +165,9 @@ def cast_batch(contracts: dict[str, dict], engine: Engine, batch_id: uuid.UUID,
                                     .where(source.c._batch_id == batch_id).order_by(source.c._id)).mappings()
                 records[result.contract], result.errors = cast_records(contract, rows)
                 result.rows_read = len(records[result.contract])
+                for entry in contract["columns"]:
+                    nulls = sum(1 for record in records[result.contract] if record[entry["target_name"]] is None)
+                    result.column_counts[entry["target_name"]] = {"values": result.rows_read - nulls, "nulls": nulls}
 
         if any(r.errors for r in results):  # 2a. au moins une erreur : rien n'est écrit
             cancel(results, "cast")
@@ -210,3 +220,8 @@ def cast_batch(contracts: dict[str, dict], engine: Engine, batch_id: uuid.UUID,
                                                     registry.c.contract == result.contract).values(
                     status=result.status, rows_read=result.rows_read, rows_inserted=result.rows_inserted,
                     cast_errors=len(result.errors), error=result.error, completed_at=result.completed_at))
+        if report_dir is not None:
+            path = write_report(contracts, results, batch_size, report_dir)
+            for result in results:
+                result.report = path
+            logger.info("rapport des traitements : %s", path)

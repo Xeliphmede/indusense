@@ -9,6 +9,9 @@
   puis on retype ce batch, sans recharger les fichiers.
 - Sinon, une seule transaction pour toutes les tables : les lignes silver déjà issues de ce batch sont remplacées
   (retyper un batch ne crée pas de doublon), puis insertion par lots de BATCH_SIZE lignes.
+- Avant le commit, chaque table silver est relue telle que stockée et rapprochée du bronze (fidelity.py, pandera) :
+  une ligne manquante ou une valeur qui ne restitue pas exactement le bronze (texte tronqué, précision perdue...)
+  est une erreur, loguée comme une erreur de cast, et la transaction est annulée.
 - Chaque ligne silver garde `_batch_id` et `_bronze_id` (= `bronze.<table>._id`) : son origine exacte.
 """
 
@@ -17,11 +20,12 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 
-from sqlalchemy import Engine, delete, insert, select, update
+from sqlalchemy import Engine, delete, insert, select, text, update
 
 from indusense.bronze.schema import REGISTRY_TABLE as BRONZE_REGISTRY
 from indusense.bronze.schema import SCHEMA as BRONZE_SCHEMA
 from indusense.silver.casting import cast_column
+from indusense.silver.fidelity import check_fidelity
 from indusense.silver.schema import REGISTRY_TABLE, SCHEMA, build_metadata, table_name
 
 BATCH_SIZE = 5_000
@@ -32,6 +36,10 @@ logger = logging.getLogger("indusense.silver")
 
 class BatchNotReady(Exception):
     """Le batch bronze est inconnu ou n'a pas réussi pour tous les contrats : rien n'est typé."""
+
+
+class FidelityFailed(Exception):
+    """Le silver relu ne restitue pas le bronze : la transaction d'écriture est annulée."""
 
 
 @dataclass(frozen=True)
@@ -56,7 +64,8 @@ class CastResult:
     status: str  # RUNNING, SUCCESS, FAILED (erreurs de cast dans ce contrat), ROLLED_BACK (un autre contrat a échoué)
     rows_read: int = 0
     rows_inserted: int = 0
-    errors: list[CastError] = field(default_factory=list)
+    values_checked: int = 0  # valeurs silver relues et rapprochées du bronze
+    errors: list[CastError] = field(default_factory=list)  # erreurs de cast, puis de fidélité
     error: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -93,6 +102,20 @@ def log_errors(errors: list[CastError]) -> None:
         logger.error("cast : %s", error)
     if len(errors) > MAX_LOGGED_ERRORS:
         logger.error("cast : ... et %d autre(s) erreur(s)", len(errors) - MAX_LOGGED_ERRORS)
+
+
+def cancel(results: list[CastResult], kind: str) -> None:
+    """Annule l'exécution après des erreurs de valeur : chacune est loguée, rien n'est gardé en silver."""
+    failed = [r for r in results if r.errors]
+    for result in results:
+        log_errors(result.errors)
+        result.rows_inserted = 0
+        if result.errors:
+            result.status, result.error = "FAILED", f"{len(result.errors)} {kind} error(s), first: {result.errors[0]}"
+        else:
+            result.status = "ROLLED_BACK"
+            result.error = f"silver run cancelled: {kind} errors in {', '.join(r.contract for r in failed)}"
+    logger.error("silver annulé : %d erreur(s) de %s, rien n'a été écrit", sum(len(r.errors) for r in results), kind)
 
 
 def check_batch(conn, metadata, contracts: dict[str, dict], batch_id: uuid.UUID) -> None:
@@ -136,17 +159,8 @@ def cast_batch(contracts: dict[str, dict], engine: Engine, batch_id: uuid.UUID,
                 records[result.contract], result.errors = cast_records(contract, rows)
                 result.rows_read = len(records[result.contract])
 
-        failed = [r for r in results if r.errors]
-        if failed:  # 2a. au moins une erreur : rien n'est écrit
-            for result in results:
-                log_errors(result.errors)
-                if result.errors:
-                    result.status, result.error = "FAILED", f"{len(result.errors)} cast error(s), first: {result.errors[0]}"
-                else:
-                    result.status = "ROLLED_BACK"
-                    result.error = f"silver run cancelled: cast errors in {', '.join(r.contract for r in failed)}"
-            logger.error("silver annulé : %d erreur(s) de cast, rien n'a été écrit",
-                         sum(len(r.errors) for r in results))
+        if any(r.errors for r in results):  # 2a. au moins une erreur : rien n'est écrit
+            cancel(results, "cast")
             return results
 
         cast_at = datetime.now(UTC)
@@ -160,11 +174,22 @@ def cast_batch(contracts: dict[str, dict], engine: Engine, batch_id: uuid.UUID,
                     chunk = [row | {"_cast_at": cast_at} for row in rows[start:start + batch_size]]
                     conn.execute(insert(target), chunk)
                     result.rows_inserted += len(chunk)
-                result.completed_at = datetime.now(UTC)
             current = None
+            for result, contract in zip(results, contracts.values()):  # 3. relecture, avant le commit
+                result.values_checked, result.errors = check_fidelity(conn, contract, metadata, batch_id)
+                result.completed_at = datetime.now(UTC)
+            if any(r.errors for r in results):
+                raise FidelityFailed  # annule la transaction : rien n'est gardé
+        with engine.begin() as conn:  # statistiques à jour : sinon le planificateur ignore les lignes du batch
+            for result in results:
+                conn.execute(text(f"ANALYZE {result.target_table}"))
         for result in results:
             result.status = "SUCCESS"
-            logger.info("silver : %s, %d ligne(s) typée(s)", result.target_table, result.rows_inserted)
+            logger.info("silver : %s, %d ligne(s) typée(s), %d valeur(s) identiques au bronze", result.target_table,
+                        result.rows_inserted, result.values_checked)
+        return results
+    except FidelityFailed:
+        cancel(results, "fidelity")
         return results
     except Exception as error:  # échec inattendu (base, lecture) : la transaction d'écriture est annulée
         culprit = current or results[0]

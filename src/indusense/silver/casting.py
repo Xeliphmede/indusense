@@ -13,8 +13,8 @@ dès l'ingestion, à repérer les valeurs que silver ne pourra pas typer (voir b
 Les horodatages sans fuseau sont **étiquetés** UTC (horloge déclarée par le contrat), jamais convertis (ADR-003).
 
 `cast_column` est le cast de la couche silver pour une colonne du contrat : `cast_value` vers le `type`, puis
-les contraintes du `silver_type` (longueur VARCHAR, précision NUMERIC, bornes des entiers, UUID) et de
-`nullable`. Toute valeur que PostgreSQL refuserait ou arrondirait est ainsi une erreur détectée avant écriture.
+les contraintes du `silver_type` (longueur VARCHAR, précision NUMERIC et flottante, bornes des entiers, UUID) et
+de `nullable`. Toute valeur que PostgreSQL refuserait ou arrondirait est ainsi une erreur détectée avant écriture.
 """
 
 import math
@@ -22,6 +22,8 @@ import re
 import uuid
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
+
+import numpy as np
 
 INTEGER_PATTERN = re.compile(r"[+-]?\d+")
 TRUE_VALUES = {"1", "true", "t", "yes", "y"}
@@ -83,14 +85,29 @@ NUMERIC_PATTERN = re.compile(r"NUMERIC(?:\((\d+)(?:,(\d+))?\))?")
 INTEGER_RANGES = {"SMALLINT": 2**15, "INTEGER": 2**31, "BIGINT": 2**63}  # bornes : [-n, n - 1]
 
 
-def to_numeric(text: str, precision: int | None, scale: int) -> Decimal:
-    """Décimal exact ; refuse plus de `scale` décimales ou plus de `precision` chiffres (PostgreSQL arrondirait)."""
+FLOAT_TYPES = {"DOUBLE PRECISION", "REAL"}
+
+
+def exact_decimal(text: str) -> Decimal:
+    """Valeur exacte d'un nombre écrit en texte (virgule décimale acceptée)."""
     try:
-        value = Decimal(text.replace(",", "."))
+        value = Decimal(text.strip().replace(",", "."))
     except InvalidOperation:
         raise ValueError from None
     if not value.is_finite():
         raise ValueError
+    return value
+
+
+def float_decimal(value: float, silver_type: str = "DOUBLE PRECISION") -> Decimal:
+    """Ce qu'un flottant PostgreSQL restitue réellement : plus courte écriture décimale du double (REAL : du float
+    32 bits)."""
+    return Decimal(str(np.float32(value)) if silver_type.upper() == "REAL" else repr(float(value)))
+
+
+def to_numeric(text: str, precision: int | None, scale: int) -> Decimal:
+    """Décimal exact ; refuse plus de `scale` décimales ou plus de `precision` chiffres (PostgreSQL arrondirait)."""
+    value = exact_decimal(text)
     if precision is not None:
         exponent = value.normalize().as_tuple().exponent
         if -exponent > scale or abs(value) >= Decimal(10) ** (precision - scale):
@@ -126,6 +143,9 @@ def cast_column(raw: str | None, entry: dict):
             value = to_numeric(text, precision, scale)
         except ValueError:
             return None, f"not a {silver_type}: {raw!r}"
+    elif silver_type in FLOAT_TYPES:
+        if float_decimal(value, silver_type) != exact_decimal(text):
+            return None, f"loses precision in {silver_type}: {raw!r}"
     elif silver_type == "UUID":
         try:
             value = uuid.UUID(text)

@@ -235,3 +235,16 @@ def test_unique_constraint_on_natural_key(engine, pipeline):
                              SELECT machine_id, timestamp, voltage_mean_v, pieces_produced, _batch_id,
                                     (SELECT bronze_id FROM silver._duplicate WHERE batch_id = :b LIMIT 1), now()
                              FROM silver.telemetry WHERE _batch_id = :b LIMIT 1"""), {"b": pipeline.batch_id})
+
+
+def test_data_dictionary(engine, pipeline, tmp_path):
+    from indusense.silver.dictionary import write_dictionary
+
+    text_ = write_dictionary(load_contracts(), engine, tmp_path / "dictionary.md", pipeline.batch_id).read_text(
+        encoding="utf-8")
+    assert f"Batch décrit : `{pipeline.batch_id}`" in text_
+    assert ("| `temperature_c` | Température moyenne de la machine sur l'heure | DOUBLE PRECISION | °C | non |  | "
+            "0.7 % | 32 | 80 |  |") in text_
+    assert "- **Lignes** (batch décrit) : 134280, après 1346 doublon(s) écarté(s)" in text_
+    assert "| `shift` |" in text_ and "matin (427), apres-midi (410), nuit (408)" in text_
+    assert "- **Source** : `datas/machine.sql.txt` (table `machine`), via `bronze.machine`" in text_

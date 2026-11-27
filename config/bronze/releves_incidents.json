@@ -23,7 +23,8 @@
       "target_name": "incident_id",
       "type": "IDENTIFIER",
       "silver_type": "TEXT",
-      "nullable": false
+      "nullable": false,
+      "description": "Identifiant de l'incident (INC-000001...), référencé par maintenance.related_incident_id"
     },
     {
       "source_name": "date",
@@ -56,7 +57,8 @@
       "target_name": "machine_id",
       "type": "IDENTIFIER",
       "silver_type": "TEXT",
-      "nullable": false
+      "nullable": false,
+      "description": "Machine concernée, référence machine.machine_code"
     },
     {
       "source_name": "severity",
@@ -90,70 +92,80 @@
       "target_name": "shift",
       "type": "CATEGORY",
       "silver_type": "TEXT",
-      "nullable": false
+      "nullable": false,
+      "description": "Équipe de l'opérateur au moment de la déclaration (matin, apres-midi, nuit)"
     },
     {
       "source_name": "type_surchauffe",
       "target_name": "type_surchauffe",
       "type": "BINARY",
       "silver_type": "BOOLEAN",
-      "nullable": false
+      "nullable": false,
+      "description": "Vrai si l'incident relève du type « surchauffe » (un incident a 1 ou 2 types)"
     },
     {
       "source_name": "type_baisse_pression",
       "target_name": "type_baisse_pression",
       "type": "BINARY",
       "silver_type": "BOOLEAN",
-      "nullable": false
+      "nullable": false,
+      "description": "Vrai si l'incident relève du type « baisse de pression » (un incident a 1 ou 2 types)"
     },
     {
       "source_name": "type_vibration",
       "target_name": "type_vibration",
       "type": "BINARY",
       "silver_type": "BOOLEAN",
-      "nullable": false
+      "nullable": false,
+      "description": "Vrai si l'incident relève du type « vibration » (un incident a 1 ou 2 types)"
     },
     {
       "source_name": "type_bruit_mecanique",
       "target_name": "type_bruit_mecanique",
       "type": "BINARY",
       "silver_type": "BOOLEAN",
-      "nullable": false
+      "nullable": false,
+      "description": "Vrai si l'incident relève du type « bruit mécanique » (un incident a 1 ou 2 types)"
     },
     {
       "source_name": "type_surconsommation",
       "target_name": "type_surconsommation",
       "type": "BINARY",
       "silver_type": "BOOLEAN",
-      "nullable": false
+      "nullable": false,
+      "description": "Vrai si l'incident relève du type « surconsommation » (un incident a 1 ou 2 types)"
     },
     {
       "source_name": "type_blocage_mecanique",
       "target_name": "type_blocage_mecanique",
       "type": "BINARY",
       "silver_type": "BOOLEAN",
-      "nullable": false
+      "nullable": false,
+      "description": "Vrai si l'incident relève du type « blocage mécanique » (un incident a 1 ou 2 types)"
     },
     {
       "source_name": "type_alarme_capteur",
       "target_name": "type_alarme_capteur",
       "type": "BINARY",
       "silver_type": "BOOLEAN",
-      "nullable": false
+      "nullable": false,
+      "description": "Vrai si l'incident relève du type « alarme capteur » (un incident a 1 ou 2 types)"
     },
     {
       "source_name": "type_arret_urgence",
       "target_name": "type_arret_urgence",
       "type": "BINARY",
       "silver_type": "BOOLEAN",
-      "nullable": false
+      "nullable": false,
+      "description": "Vrai si l'incident relève du type « arrêt d'urgence » (un incident a 1 ou 2 types)"
     },
     {
       "source_name": "type_defaut_qualite",
       "target_name": "type_defaut_qualite",
       "type": "BINARY",
       "silver_type": "BOOLEAN",
-      "nullable": false
+      "nullable": false,
+      "description": "Vrai si l'incident relève du type « défaut qualité » (un incident a 1 ou 2 types)"
     }
   ],
   "derived_columns": [

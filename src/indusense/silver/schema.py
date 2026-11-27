@@ -22,6 +22,7 @@ from sqlalchemy import (BigInteger, Boolean, Column, Date, DateTime, Double, For
 from sqlalchemy.types import TypeEngine
 
 from indusense.bronze import schema as bronze
+from indusense.bronze.contract import UNIT_LABELS
 
 SCHEMA = "silver"
 REGISTRY_TABLE = "_cast_run"
@@ -58,6 +59,12 @@ def sql_type(silver_type: str) -> TypeEngine:
     raise ValueError(f"unsupported silver_type: {silver_type!r}")
 
 
+def column_comment(entry: dict) -> str:
+    """Commentaire PostgreSQL d'une colonne silver : sa description, et son unité s'il y en a une."""
+    comment = entry.get("description") or f"'{entry['target_name']}' typé en {entry['silver_type']}"
+    return f"{comment} (unité : {UNIT_LABELS[entry['unit']]})" if entry.get("unit") else comment
+
+
 def table_name(contract: dict) -> str:
     return contract["target"]["table"]
 
@@ -66,7 +73,7 @@ def contract_table(contract: dict, metadata: MetaData) -> Table:
     """Table silver d'un contrat : colonnes typées, puis _batch_id, _bronze_id (PK, FK bronze) et _cast_at."""
     table = table_name(contract)
     columns = [Column(entry["target_name"], sql_type(entry["silver_type"]), nullable=entry.get("nullable", True),
-                      comment=entry.get("description") or f"'{entry['target_name']}' typé en {entry['silver_type']}")
+                      comment=column_comment(entry))
                for entry in contract["columns"]]
     return Table(
         table,

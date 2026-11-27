@@ -21,56 +21,66 @@
       "target_name": "machine_code",
       "type": "IDENTIFIER",
       "silver_type": "VARCHAR(16)",
-      "nullable": false
+      "nullable": false,
+      "description": "Code unique de la machine (MACH-01 à MACH-15), référencé par la télémétrie, les incidents et les maintenances"
     },
     {
       "source_name": "commissioning_date",
       "target_name": "commissioning_date",
       "type": "DATE",
       "silver_type": "DATE",
-      "nullable": false
+      "nullable": false,
+      "description": "Date de mise en service de la machine"
     },
     {
       "source_name": "max_daily_capacity",
       "target_name": "max_daily_capacity",
       "type": "INTEGER",
       "silver_type": "INTEGER",
-      "nullable": false
+      "nullable": false,
+      "unit": "PIECE_PER_DAY",
+      "description": "Capacité de production maximale déclarée par jour"
     },
     {
       "source_name": "max_hourly_capacity_pieces",
       "target_name": "max_hourly_capacity_pieces",
       "type": "INTEGER",
       "silver_type": "INTEGER",
-      "nullable": false
+      "nullable": false,
+      "unit": "PIECE_PER_HOUR",
+      "description": "Capacité de production maximale déclarée par heure"
     },
     {
       "source_name": "model",
       "target_name": "model",
       "type": "CATEGORY",
       "silver_type": "VARCHAR(32)",
-      "nullable": false
+      "nullable": false,
+      "description": "Modèle de la machine (InduPress-X1, X2, X3, Z1)"
     },
     {
       "source_name": "production_line",
       "target_name": "production_line",
       "type": "CATEGORY",
       "silver_type": "VARCHAR(16)",
-      "nullable": false
+      "nullable": false,
+      "description": "Ligne de production de la machine (Ligne-A à Ligne-C)"
     },
     {
       "source_name": "location",
       "target_name": "location",
       "type": "CATEGORY",
       "silver_type": "VARCHAR(16)",
-      "nullable": false
+      "nullable": false,
+      "description": "Atelier où se trouve la machine (Atelier-1 à Atelier-3)"
     },
     {
       "source_name": "criticality",
       "target_name": "criticality",
       "type": "CATEGORY",
       "silver_type": "VARCHAR(8)",
-      "nullable": false
+      "nullable": false,
+      "description": "Criticité de la machine pour la production (LOW, MEDIUM, HIGH)"
     }
   ]
 }

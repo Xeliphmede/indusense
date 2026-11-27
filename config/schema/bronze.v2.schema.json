@@ -68,7 +68,7 @@
         "target_name": {"$ref": "#/$defs/identifier"},
         "type": {"$ref": "#/$defs/type", "description": "Type visé en silver ; en bronze, toute colonne est TEXT"},
         "silver_type": {"$ref": "#/$defs/silver_type"},
-        "unit": {"enum": ["CELSIUS", "BAR", "VOLT", "RPM", "HOUR"]},
+        "unit": {"enum": ["CELSIUS", "BAR", "VOLT", "RPM", "HOUR", "PIECE_PER_HOUR", "PIECE_PER_DAY"]},
         "nullable": {"type": "boolean"},
         "personal_data": {"type": "boolean", "description": "Donnée personnelle (RGPD)"},
         "pseudonymize": {

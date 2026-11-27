@@ -44,6 +44,10 @@ DEFAULT_SILVER_TYPES = {
     "TIMESTAMPTZ": "TIMESTAMPTZ",
 }
 
+# unité du contrat -> symbole affiché (commentaires PostgreSQL, dictionnaire de données)
+UNIT_LABELS = {"CELSIUS": "°C", "BAR": "bar", "VOLT": "V", "RPM": "tr/min", "HOUR": "h",
+               "PIECE_PER_HOUR": "pièces/h", "PIECE_PER_DAY": "pièces/jour"}
+
 # suffixe du nom de colonne -> unité (NUMBER uniquement) ; sinon l'unité est une décision explicite
 UNIT_SUFFIXES = {"_c": "CELSIUS", "_bar": "BAR", "_v": "VOLT", "_rpm": "RPM", "_hours": "HOUR"}
 

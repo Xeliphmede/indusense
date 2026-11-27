@@ -21,14 +21,16 @@
       "target_name": "maintenance_id",
       "type": "IDENTIFIER",
       "silver_type": "INTEGER",
-      "nullable": false
+      "nullable": false,
+      "description": "Identifiant de l'intervention de maintenance"
     },
     {
       "source_name": "machine_code",
       "target_name": "machine_code",
       "type": "IDENTIFIER",
       "silver_type": "VARCHAR(16)",
-      "nullable": false
+      "nullable": false,
+      "description": "Machine concernée, référence machine.machine_code"
     },
     {
       "source_name": "maintenance_at",
@@ -43,28 +45,32 @@
       "target_name": "maintenance_type",
       "type": "CATEGORY",
       "silver_type": "VARCHAR(16)",
-      "nullable": false
+      "nullable": false,
+      "description": "Type d'intervention : proactive (planifiée) ou reactive (après une panne)"
     },
     {
       "source_name": "action_type",
       "target_name": "action_type",
       "type": "CATEGORY",
       "silver_type": "VARCHAR(32)",
-      "nullable": false
+      "nullable": false,
+      "description": "Action : changement_programme ou changement_suite_panne (redondant avec maintenance_type sur les données actuelles)"
     },
     {
       "source_name": "component",
       "target_name": "component",
       "type": "CATEGORY",
       "silver_type": "VARCHAR(64)",
-      "nullable": false
+      "nullable": false,
+      "description": "Composant remplacé (capteur pression, filtre hydraulique...)"
     },
     {
       "source_name": "description",
       "target_name": "description",
       "type": "TEXT",
       "silver_type": "TEXT",
-      "nullable": false
+      "nullable": false,
+      "description": "Libellé libre de l'intervention"
     },
     {
       "source_name": "related_incident_id",
@@ -80,7 +86,8 @@
       "type": "NUMBER",
       "silver_type": "NUMERIC(6,2)",
       "unit": "HOUR",
-      "nullable": false
+      "nullable": false,
+      "description": "Durée de l'intervention"
     }
   ]
 }

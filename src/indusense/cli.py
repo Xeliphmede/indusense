@@ -7,7 +7,9 @@
 - `indusense pipeline` : ingestion bronze des fichiers puis typage silver de ce batch ; code de sortie 1 si une
   étape échoue (les erreurs de cast sont listées) ;
 - `indusense silver cast BATCH_ID` : (re)type en silver un batch bronze existant, par exemple après correction
-  d'un contrat.
+  d'un contrat ;
+- `indusense silver dictionary [--batch-id BATCH_ID]` : régénère le dictionnaire de données silver
+  (docs/silver_dictionary.md) à partir des contrats et du dernier batch typé.
 """
 
 import argparse
@@ -118,6 +120,11 @@ def silver(argv: list[str]) -> int:
                                description="Type le batch bronze BATCH_ID dans les tables silver (remplace les lignes "
                                            "silver déjà issues de ce batch). Code de sortie 1 en cas d'erreur.")
     cast.add_argument("batch_id", type=uuid.UUID, metavar="BATCH_ID", help="batch_id de l'ingestion bronze")
+    dictionary = commands.add_parser("dictionary", help="régénère le dictionnaire de données silver",
+                                     description="Écrit docs/silver_dictionary.md : description, type, unité et "
+                                                 "statistiques de chaque colonne silver, à partir des contrats et "
+                                                 "d'un batch typé (par défaut le dernier).")
+    dictionary.add_argument("--batch-id", type=uuid.UUID, metavar="BATCH_ID", help="batch décrit (défaut : dernier)")
     args = parser.parse_args(argv)
 
     from sqlalchemy import create_engine
@@ -125,6 +132,12 @@ def silver(argv: list[str]) -> int:
     from indusense.bronze.contract import load_contracts
     from indusense.settings import get_settings
     from indusense.silver.loader import BatchNotReady, cast_batch
+
+    if args.command == "dictionary":
+        from indusense.silver.dictionary import write_dictionary
+
+        print(write_dictionary(load_contracts(), create_engine(get_settings().url()), batch_id=args.batch_id))
+        return 0
 
     try:
         results = cast_batch(load_contracts(), create_engine(get_settings().url()), args.batch_id)

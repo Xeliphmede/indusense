@@ -23,6 +23,8 @@ from indusense.silver.loader import BatchNotReady, cast_batch, cast_records
 pytestmark = pytest.mark.integration
 TEST_DB = "indusense_test_silver"
 EXPECTED_ROWS = {"machine": 15, "maintenance": 115, "releves_incidents": 1245, "telemetry": 135626}
+DUPLICATES = {"machine": 0, "maintenance": 0, "releves_incidents": 0, "telemetry": 1346}
+SILVER_ROWS = {table: rows - DUPLICATES[table] for table, rows in EXPECTED_ROWS.items()}
 
 
 @pytest.fixture(scope="module")
@@ -62,8 +64,10 @@ def scalar(engine, sql: str, **params):
 def test_pipeline_types_every_bronze_row(engine, pipeline):
     assert pipeline.succeeded and not pipeline.cast_errors
     assert {r.target_table: r.rows_inserted for r in pipeline.silver} == {
-        f"silver.{table}": rows for table, rows in EXPECTED_ROWS.items()}
-    for table, rows in EXPECTED_ROWS.items():
+        f"silver.{table}": rows for table, rows in SILVER_ROWS.items()}
+    assert {r.target_table: r.rows_deduplicated for r in pipeline.silver} == {
+        f"silver.{table}": rows for table, rows in DUPLICATES.items()}
+    for table, rows in SILVER_ROWS.items():
         assert scalar(engine, f"SELECT count(*) FROM silver.{table} WHERE _batch_id = :b", b=pipeline.batch_id) == rows
 
 
@@ -71,7 +75,7 @@ def test_each_silver_row_points_to_its_bronze_row(engine, pipeline):
     for table in EXPECTED_ROWS:
         assert scalar(engine, f"""
             SELECT count(*) FROM silver.{table} s JOIN bronze.{table} b ON b._id = s._bronze_id
-            WHERE s._batch_id = b._batch_id AND s._batch_id = :b""", b=pipeline.batch_id) == EXPECTED_ROWS[table]
+            WHERE s._batch_id = b._batch_id AND s._batch_id = :b""", b=pipeline.batch_id) == SILVER_ROWS[table]
 
 
 def test_values_are_typed(engine, pipeline):
@@ -87,8 +91,8 @@ def test_values_are_typed(engine, pipeline):
 
 
 def test_empty_bronze_values_become_null(engine, pipeline):
-    empty = scalar(engine, "SELECT count(*) FROM bronze.telemetry WHERE _batch_id = :b AND temperature_c = ''",
-                   b=pipeline.batch_id)
+    empty = scalar(engine, "SELECT count(*) FROM bronze.telemetry b JOIN silver.telemetry s ON s._bronze_id = b._id "
+                           "WHERE b._batch_id = :b AND b.temperature_c = ''", b=pipeline.batch_id)
     assert empty > 0
     assert scalar(engine, "SELECT count(*) FROM silver.telemetry WHERE _batch_id = :b AND temperature_c IS NULL",
                   b=pipeline.batch_id) == empty
@@ -150,7 +154,7 @@ def test_cast_records_collects_every_error():
 
 def test_every_silver_value_is_checked_against_bronze(pipeline):
     checked = {r.target_table: r.values_checked for r in pipeline.silver}
-    assert checked["silver.telemetry"] == EXPECTED_ROWS["telemetry"] * 7
+    assert checked["silver.telemetry"] == SILVER_ROWS["telemetry"] * 7 + DUPLICATES["telemetry"] * 2  # clé seule
 
 
 def test_value_lost_after_cast_cancels_silver(engine, pipeline, monkeypatch):
@@ -187,7 +191,8 @@ def test_report_lists_every_column_treatment_with_batch_size(pipeline, reports):
     for contract in load_contracts().values():
         for entry in contract["columns"]:
             assert f"### `{entry['target_name']}` : {entry['type']} -> {entry['silver_type']}" in report
-    assert "894 NULL" in report  # temperature_c : vides du bronze
+    assert "| `silver.telemetry` | `telemetry.json` | SUCCESS | 135626 | 1346 | 134280 |" in report
+    assert "### Doublons écartés (1346, 100 premiers)" in report
     assert "décimal exact NUMERIC(6,2) : au plus 2 décimale(s)" in report
     assert "`date_time` : MERGE de date, time" in report
 
@@ -199,3 +204,34 @@ def test_failed_run_also_writes_its_report(engine, pipeline, tmp_path):
     report = results[0].report.read_text(encoding="utf-8")
     assert "**FAILED**" in report and "Exécution annulée" in report and "100 lignes" in report
     assert "longer than VARCHAR(4): 'InduPress-X" in report
+
+
+def test_telemetry_has_one_row_per_natural_key(engine, pipeline):
+    assert scalar(engine, """SELECT count(*) FROM (SELECT 1 FROM silver.telemetry WHERE _batch_id = :b
+                             GROUP BY machine_id, timestamp HAVING count(*) > 1) d""", b=pipeline.batch_id) == 0
+
+
+def test_every_dropped_row_is_recorded_with_the_kept_one(engine, pipeline):
+    assert scalar(engine, "SELECT count(*) FROM silver._duplicate WHERE batch_id = :b", b=pipeline.batch_id) == 1346
+    # chaque ligne bronze est soit en silver, soit écartée au profit d'une ligne silver de même clé
+    assert scalar(engine, """
+        SELECT count(*) FROM bronze.telemetry b
+        LEFT JOIN silver.telemetry s ON s._bronze_id = b._id
+        LEFT JOIN silver._duplicate d ON d.target_table = 'silver.telemetry' AND d.bronze_id = b._id
+        LEFT JOIN silver.telemetry k ON k._bronze_id = d.kept_bronze_id
+        WHERE b._batch_id = :b AND s._bronze_id IS NULL
+          AND (k._bronze_id IS NULL OR k.machine_id <> b.machine_id)""", b=pipeline.batch_id) == 0
+    # la ligne gardée est la plus complète
+    assert scalar(engine, "SELECT count(*) FROM silver._duplicate WHERE batch_id = :b "
+                          "AND kept_missing_values > missing_values", b=pipeline.batch_id) == 0
+
+
+def test_unique_constraint_on_natural_key(engine, pipeline):
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError, match="uq_silver_telemetry_natural_key"), engine.begin() as conn:
+        conn.execute(text("""INSERT INTO silver.telemetry (machine_id, timestamp, voltage_mean_v, pieces_produced,
+                             _batch_id, _bronze_id, _cast_at)
+                             SELECT machine_id, timestamp, voltage_mean_v, pieces_produced, _batch_id,
+                                    (SELECT bronze_id FROM silver._duplicate WHERE batch_id = :b LIMIT 1), now()
+                             FROM silver.telemetry WHERE _batch_id = :b LIMIT 1"""), {"b": pipeline.batch_id})
